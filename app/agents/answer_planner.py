@@ -59,7 +59,7 @@ def plan_answer(
         return _plan_data_status(sources, factual, evidence_quality, provenance)
     if requested == "regional_comparison":
         return _plan_comparison(sources, factual)
-    if requested == "historical_analog_outcome" or sources.decomp.intent == IntentLabel.RETROSPECTIVE:
+    if requested == "historical_analog_outcome":
         return _plan_retrospective(sources, factual, analogs)
     if requested == "weather_notice_news_correlation":
         return _plan_weather_news(sources, factual)
@@ -67,11 +67,12 @@ def plan_answer(
         return _plan_price_fluctuation(sources, factual, fuel_mix)
     if requested == "fuel_source_recommendation":
         return _plan_fuel_source(sources, factual, fuel_mix)
-    if requested == "portfolio_action" or sources.decomp.intent == IntentLabel.ACTION_RECOMMENDATION:
+    if requested == "portfolio_action":
         return _plan_portfolio_or_action(sources, factual)
+    # requires_forecast is a data signal, not an intent override — keep this one.
     if requested == "causal_explanation_with_forecast" or sources.decomp.requires_forecast:
         return _plan_explanation(sources, factual, include_forecast=True)
-    if requested == "causal_explanation" or sources.decomp.intent == IntentLabel.EXPLANATION:
+    if requested == "causal_explanation":
         return _plan_explanation(sources, factual, include_forecast=False)
     return _plan_lookup(sources, factual)
 

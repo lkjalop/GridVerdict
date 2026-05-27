@@ -551,16 +551,21 @@ def _requested_output_for(
 ) -> str:
     if intent == IntentLabel.TRACE_REPLAY:
         return "trace_replay"
-    if intent == IntentLabel.ACTION_RECOMMENDATION:
-        return "portfolio_action"
     if any(w in lower for w in ["fluctuate", "fluctuation", "moved from", "back down", "price path"]):
         return "price_fluctuation_attribution"
-    # Fuel/source comparison must come before generic COMPARISON intent check —
-    # "compare coal vs solar" or "best instead of hydro" is a fuel question, not regional.
+    # Fuel/source comparison must come before ACTION_RECOMMENDATION and COMPARISON —
+    # "why coal instead of hydro, should I be cautious?" is a fuel question even if
+    # "should I" is present. Multi-part queries must not lose their primary intent.
     if any(t in lower for t in ["coal", "solar", "hydro", "wind", "gas", "battery"]) and any(
-        w in lower for w in ["buy", "best", "source", "instead", "prefer", "choose", "compare", "versus", "vs", "contributes", "contribute"]
+        w in lower for w in [
+            "buy", "best", "source", "instead", "prefer", "choose",
+            "compare", "versus", "vs", "contributes", "contribute",
+            "cautious", "changed", "change", "switch", "now instead",
+        ]
     ):
         return "fuel_source_recommendation"
+    if intent == IntentLabel.ACTION_RECOMMENDATION:
+        return "portfolio_action"
     if intent == IntentLabel.COMPARISON:
         return "regional_comparison"
     if "stale" in lower or "fresh" in lower or "data status" in lower or "source status" in lower:
