@@ -43,6 +43,7 @@ cache/
 # Reports and dumps
 reports/
 Dump/
+dump/
 
 # IDE
 .vscode/
