@@ -45,6 +45,8 @@ from app.db.models import Query as QueryModel
 from app.db.models import Session as SessionModel
 from app.db.models import MarketEvent
 from app.engines.decomposition import decompose as llm_decompose
+from app.engines.query_restatement import restate_query
+from app.engines.coverage_auditor import audit_coverage
 from app.security.observer import get_observer, log_observer_event
 from app.api.routes_security import append_observer_result
 from app.api.metrics_registry import query_latency_ms, llm_decompose_latency_ms
@@ -127,9 +129,20 @@ async def submit_query(
             detail=f"Unsupported region '{region}'. Valid: {sorted(_VALID_REGIONS)}",
         )
 
+    # --- 0.5. Query restatement — extract sub-questions before decompose ---
+    # Uses qwen3:14b /no_think (~1s). Falls back silently to empty result.
+    restatement = await restate_query(body.text)
+    # Seed sub-questions into the decomposer text so it produces better
+    # causal_targets and requested_output for multi-part queries.
+    _decompose_text = restatement.seed_text(body.text)
+
     # --- 1. Decompose (LLM: Ollama → Claude → rule-based) ---
     _decomp_t0 = time.perf_counter()
-    decomp = await llm_decompose(body.text, region_hint=region, query_id=query_id)
+    decomp = await llm_decompose(_decompose_text, region_hint=region, query_id=query_id)
+    # Restore raw_query to the original user text when we prepended a sub-questions prefix,
+    # so DB/trace stores what the user typed rather than the seeded decomposer input.
+    if _decompose_text != body.text:
+        decomp = decomp.model_copy(update={"raw_query": body.text})
     llm_decompose_latency_ms.observe((time.perf_counter() - _decomp_t0) * 1000)
 
     # --- 1b. Security pass 2 — decomposition intent check ---
@@ -348,6 +361,45 @@ async def submit_query(
             [f.rule for f in _cv_result.findings],
         )
 
+    # --- 4.5. Adversarial critic — re-plan if answer misses sub-questions ---
+    # Only fires when: low confidence + restatement detected gap risk + sub-questions available.
+    # Uses qwen3:14b WITH thinking mode (~4-8s). Re-runs plan_answer only; no re-gather.
+    if (
+        factual.confidence < 0.6
+        and not restatement.is_empty()
+        and restatement.answer_gap_risk
+    ):
+        audit = await audit_coverage(
+            restatement.sub_questions,
+            factual.answer_sections or [],
+            decomp.requested_output or "",
+        )
+        if audit.has_actionable_suggestion():
+            logger.debug(
+                "Coverage auditor re-routing %s → %s: %s",
+                decomp.requested_output,
+                audit.suggested_output,
+                audit.reasoning,
+            )
+            _patched_decomp = decomp.model_copy(update={"requested_output": audit.suggested_output})
+            _patched_sources = assemble_why_sources(_patched_decomp, gather, region)
+            try:
+                factual = apply_plan_to_verdict(
+                    factual,
+                    plan_answer(
+                        _patched_sources,
+                        factual,
+                        analogs=gather.analogs,
+                        evidence_quality=evidence_quality,
+                        temporal_evidence=temporal_evidence,
+                        provenance=provenance,
+                        fuel_mix=fuel_mix,
+                    ),
+                )
+                decomp = _patched_decomp
+            except Exception as exc:
+                logger.debug("Critic re-plan failed (non-fatal, keeping original): %s", exc)
+
     # --- 6. Security pass 4 — answer hygiene ---
     answer_check = observer.pass_answer(factual.model_dump(mode="json"))
     append_observer_result(answer_check, "answer")
@@ -427,12 +479,19 @@ async def submit_query(
         comparison_table = rows if rows else None
 
     query_latency_ms.observe((time.perf_counter() - _t0) * 1000)
+    _decomp_dict = decomp.model_dump()
+    if not restatement.is_empty():
+        _decomp_dict["restatement"] = {
+            "sub_questions": restatement.sub_questions,
+            "primary_intent": restatement.primary_intent,
+            "answer_gap_risk": restatement.answer_gap_risk,
+        }
     return QueryResponse(
         query_id=query_id,
         session_id=session_id,
         intent=decomp.intent.value,
         verdict=factual,
-        decomposition=decomp.model_dump(),
+        decomposition=_decomp_dict,
         viewport_type=viewport_type,
         comparison_table=comparison_table,
         seasonal_summary=None,
