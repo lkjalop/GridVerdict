@@ -1,0 +1,27 @@
+version: "3.9"
+
+# Lightweight test infrastructure — Redis only.
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d
+#   GRIDVERDICT_REDIS_TEST=1 pytest tests/integration/ -v
+#   docker compose -f docker-compose.test.yml down
+#
+# The app is NOT started here; only the external services the integration tests
+# need are defined. Tests boot a FastAPI ASGI app in-process against these services.
+
+services:
+  redis_test:
+    image: redis:7-alpine
+    container_name: gv_redis_test
+    ports:
+      - "6380:6379"   # 6380 to avoid clashing with any local Redis on 6379
+    command: redis-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+networks:
+  default:
+    name: gv_test_net

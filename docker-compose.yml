@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gridverdict
+      POSTGRES_USER: gv
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gv -d gridverdict"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gv:${DB_PASSWORD}@db/gridverdict
+      JWT_SECRET: ${JWT_SECRET}
+      NEMWEB_CACHE_DIR: /app/cache/nemweb
+      LOG_LEVEL: INFO
+      GRIDVERDICT_DEV_NO_AUTH: ${GRIDVERDICT_DEV_NO_AUTH:-false}
+    volumes:
+      - nemweb_cache:/app/cache/nemweb
+      - ./frontend:/app/frontend:ro
+    ports:
+      - "8000:8000"
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@gridverdict.local
+      PGADMIN_DEFAULT_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+
+volumes:
+  pgdata:
+  nemweb_cache:

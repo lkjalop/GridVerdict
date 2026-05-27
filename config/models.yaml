@@ -1,0 +1,76 @@
+# GridVerdict model tier configuration
+#
+# LLM DESIGN RULE: The LLM decomposer produces INTENT and ENTITIES only.
+# It never produces numbers or asserts market facts.
+# The deterministic engine layer does all numeric reasoning.
+#
+# Tier selection is driven by the GRIDVERDICT_MODEL_PROFILE env var
+# (or settings.model_profile). Profiles:
+#   cost_optimized  — Ollama local first, Claude Haiku fallback
+#   balanced        — Ollama local first, Claude Sonnet fallback
+#   accuracy        — Claude Sonnet only (no local fallback)
+
+profiles:
+
+  cost_optimized:
+    decomposer:
+      primary:
+        backend: ollama
+        model: mistral
+        timeout_s: 15
+        max_tokens: 256
+      fallback:
+        backend: claude
+        model: claude-haiku-4-5-20251001
+        max_tokens: 256
+      last_resort:
+        backend: rule_based
+    narrative_augmenter:
+      enabled: false   # LLM style augmentation disabled — deterministic only
+
+  balanced:
+    decomposer:
+      primary:
+        backend: ollama
+        model: mistral
+        timeout_s: 15
+        max_tokens: 256
+      fallback:
+        backend: claude
+        model: claude-sonnet-4-6
+        max_tokens: 256
+      last_resort:
+        backend: rule_based
+    narrative_augmenter:
+      enabled: false
+
+  accuracy:
+    decomposer:
+      primary:
+        backend: claude
+        model: claude-sonnet-4-6
+        max_tokens: 256
+      fallback:
+        backend: rule_based
+      last_resort:
+        backend: rule_based
+    narrative_augmenter:
+      enabled: false
+
+# Forecasting models — used by the backtest harness and inference pipeline
+forecasting:
+  models:
+    - name: persistence
+      enabled: true
+    - name: seasonal_naive
+      enabled: true
+    - name: aemo_predispatch
+      enabled: true
+    - name: lnn_ltc
+      enabled: true
+      requires_torch: true
+      hidden_size: 32
+      seq_len: 12
+      epochs: 60
+      lr: 0.001
+      min_train_intervals: 288

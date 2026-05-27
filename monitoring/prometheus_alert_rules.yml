@@ -1,0 +1,211 @@
+groups:
+  - name: gridverdict.dispatch
+    interval: 30s
+    rules:
+
+      # ── Stale dispatch data ───────────────────────────────────────────────────
+      - alert: StaleDispatchData
+        expr: gv_last_dispatch_age_seconds > 120
+        for: 2m
+        labels:
+          severity: warning
+          team: data
+        annotations:
+          summary: "AEMO dispatch snapshot is stale ({{ $value | humanizeDuration }})"
+          description: >
+            The last successful AEMO_DISPATCH_PRICE snapshot is more than 120 seconds old.
+            The live market panel will show stale prices. Check the dispatch ingest job and
+            AEMO NEMWeb availability.
+          runbook: "https://github.com/gridverdict/ops/wiki/stale-dispatch"
+
+      - alert: DispatchDataCritical
+        expr: gv_last_dispatch_age_seconds > 600
+        for: 1m
+        labels:
+          severity: critical
+          team: data
+        annotations:
+          summary: "AEMO dispatch data severely stale ({{ $value | humanizeDuration }})"
+          description: >
+            Dispatch data is more than 10 minutes old. All live recommendations are
+            operating on stale data. Manual operator override required.
+
+  - name: gridverdict.scheduler
+    interval: 30s
+    rules:
+
+      # ── Scheduler job failures ─────────────────────────────────��──────────────
+      - alert: SchedulerJobFailure
+        expr: rate(gv_ingest_failure_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: data
+        annotations:
+          summary: "Scheduler ingest job failing (job={{ $labels.job }})"
+          description: >
+            The APScheduler job '{{ $labels.job }}' has been producing failures for
+            the past 5 minutes. Historical data gaps may occur. Check scheduler logs.
+          runbook: "https://github.com/gridverdict/ops/wiki/scheduler-failures"
+
+      - alert: SchedulerJobCritical
+        expr: rate(gv_ingest_failure_total[15m]) > 0.1
+        for: 10m
+        labels:
+          severity: critical
+          team: data
+        annotations:
+          summary: "High scheduler failure rate (job={{ $labels.job }})"
+          description: >
+            Ingest job '{{ $labels.job }}' is failing at a sustained high rate.
+            Historical lookback will have significant data gaps.
+
+  - name: gridverdict.redis
+    interval: 15s
+    rules:
+
+      # ── Redis connectivity ────────────────────────────────────────────────────
+      - alert: RedisDown
+        expr: gv_redis_connected == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "GridVerdict Redis connection is down"
+          description: >
+            The Redis connection is reporting as disconnected. All distributed rate
+            limiting, SSE broadcast fanout, and scheduler leader election will fall
+            back to in-process alternatives. Horizontal scaling will not function.
+          runbook: "https://github.com/gridverdict/ops/wiki/redis-down"
+
+      # ── Redis absent (metric not emitting — possible metric pipeline failure) ─
+      - alert: RedisMetricAbsent
+        expr: absent(gv_redis_connected)
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Redis health metric is absent"
+          description: >
+            The gv_redis_connected gauge is not being emitted. This could indicate
+            a metrics pipeline failure or that the application has not yet connected.
+
+  - name: gridverdict.latency
+    interval: 30s
+    rules:
+
+      # ── Query P99 latency ─────────────────────────────────────────────────────
+      - alert: HighQueryLatencyP99
+        expr: >
+          histogram_quantile(0.99,
+            rate(gv_query_latency_ms_bucket[5m])
+          ) > 5000
+        for: 5m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "Query P99 latency exceeds 5 seconds"
+          description: >
+            The 99th percentile query latency is {{ $value | humanize }}ms over the
+            last 5 minutes. This exceeds the 5-second SLO. Check LLM decomposer and
+            scatter_gather task performance.
+          runbook: "https://github.com/gridverdict/ops/wiki/high-query-latency"
+
+      - alert: HighQueryLatencyMedian
+        expr: >
+          histogram_quantile(0.50,
+            rate(gv_query_latency_ms_bucket[5m])
+          ) > 2000
+        for: 10m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "Query median latency exceeds 2 seconds"
+          description: >
+            The median (P50) query latency is {{ $value | humanize }}ms. Something
+            is systematically slowing down query processing.
+
+      - alert: HighDecomposeLatency
+        expr: >
+          histogram_quantile(0.95,
+            rate(gv_llm_decompose_latency_ms_bucket[5m])
+          ) > 3000
+        for: 5m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "LLM decompose P95 latency exceeds 3 seconds"
+          description: >
+            The LLM query decomposer P95 latency is {{ $value | humanize }}ms.
+            Check Ollama/Claude API availability and response times.
+
+  - name: gridverdict.claims
+    interval: 30s
+    rules:
+
+      # ── Claim downgrade spike ─────────────────────────────────────────────────
+      - alert: ClaimDowngradeSpike
+        expr: rate(gv_claim_verifier_downgrades_total[5m]) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          team: ml
+        annotations:
+          summary: "High rate of claim verifier downgrades"
+          description: >
+            The claim verifier is downgrading answers at a rate of {{ $value | humanize }}
+            per second. This suggests model outputs are systematically violating the
+            evidence contract. Check why_builder and forecast model quality.
+          runbook: "https://github.com/gridverdict/ops/wiki/claim-downgrades"
+
+      - alert: ClaimDowngradeCritical
+        expr: rate(gv_claim_verifier_downgrades_total[5m]) > 2.0
+        for: 2m
+        labels:
+          severity: critical
+          team: ml
+        annotations:
+          summary: "Critical claim verifier downgrade rate — answers may be unreliable"
+          description: >
+            More than 2 downgrades/second. The answer pipeline may be systematically
+            fabricating or mis-citing evidence. Consider disabling LLM narration temporarily.
+
+  - name: gridverdict.sse
+    interval: 15s
+    rules:
+
+      # ── SSE disconnect spike ──────────────────────────────────────────────────
+      - alert: SSESubscribersZero
+        expr: gv_sse_subscribers == 0
+        for: 10m
+        labels:
+          severity: info
+          team: frontend
+        annotations:
+          summary: "No active SSE subscribers"
+          description: >
+            No clients are connected via Server-Sent Events. This is expected during
+            low-traffic periods but may indicate a frontend connection issue if this
+            alert fires during business hours.
+
+      # To detect a spike in disconnections, we watch for a sudden large drop.
+      # This requires recording rules for previous values — approximated with a
+      # time-shifted comparison.
+      - alert: SSESubscriberDropLarge
+        expr: >
+          (gv_sse_subscribers offset 2m) - gv_sse_subscribers > 10
+          and gv_sse_subscribers < 5
+        for: 1m
+        labels:
+          severity: warning
+          team: frontend
+        annotations:
+          summary: "Large SSE subscriber drop detected"
+          description: >
+            SSE subscribers dropped by more than 10 within 2 minutes (now: {{ $value }}).
+            This may indicate a server restart, network partition, or frontend issue.

@@ -1,0 +1,92 @@
+regions:
+  NSW1:
+    label: New South Wales and ACT
+    aliases:
+      - nsw
+      - new south wales
+      - act
+      - sydney
+      - canberra
+      - newcastle
+      - wollongong
+      - penrith
+      - parramatta
+      - griffith
+      - wagga wagga
+      - albury
+      - dubbo
+      - orange
+      - broken hill
+      - bathurst
+      - tamworth
+      - port macquarie
+      - lismore
+      - armidale
+      - queanbeyan
+      - nowra
+  VIC1:
+    label: Victoria
+    aliases:
+      - vic
+      - victoria
+      - melbourne
+      - geelong
+      - ballarat
+      - bendigo
+      - mildura
+      - shepparton
+      - wodonga
+      - warrnambool
+      - traralgon
+      - sale
+      - horsham
+      - swan hill
+  QLD1:
+    label: Queensland
+    aliases:
+      - qld
+      - queensland
+      - brisbane
+      - gold coast
+      - cairns
+      - townsville
+      - rockhampton
+      - toowoomba
+      - mackay
+      - bundaberg
+      - gladstone
+      - hervey bay
+      - maryborough
+      - mount isa
+  SA1:
+    label: South Australia
+    aliases:
+      - sa
+      - south australia
+      - adelaide
+      - port augusta
+      - whyalla
+      - port pirie
+      - mount gambier
+      - ceduna
+  TAS1:
+    label: Tasmania
+    aliases:
+      - tas
+      - tasmania
+      - hobart
+      - burnie
+      - devonport
+      - launceston
+
+non_nem:
+  darwin: Darwin is in the Northern Territory and is not connected to the NEM.
+  alice springs: Alice Springs is in the Northern Territory and is not connected to the NEM.
+  katherine: Katherine is in the Northern Territory and is not connected to the NEM.
+  northern territory: Northern Territory load is outside the NEM.
+  nt: Northern Territory load is outside the NEM.
+  perth: Perth uses Western Australia's SWIS grid, not the NEM.
+  broome: Broome is outside the NEM.
+  kalgoorlie: Kalgoorlie is outside the NEM.
+  western australia: Western Australia uses SWIS/NWIS, not the NEM.
+  wa: Western Australia uses SWIS/NWIS, not the NEM.

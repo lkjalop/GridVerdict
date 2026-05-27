@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "gridverdict"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "httpx>=0.28",
+    "python-jose[cryptography]>=3.3",
+    "passlib[bcrypt]>=1.7",
+    "python-multipart>=0.0.18",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "python-dotenv>=1.0",
+    "aiofiles>=24.1",
+    "apscheduler>=3.10",
+    "anthropic>=0.40",
+    "river>=0.21",
+    "redis[asyncio]>=5.0",
+    "prometheus-client>=0.21",
+]
+
+[project.optional-dependencies]
+ml = [
+    "lightgbm>=4.5",
+    "torch>=2.4",
+    "ncps>=0.0.7",
+    "sentence-transformers>=3.3",
+    "networkx>=3.4",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.28",
+    "ruff>=0.8",
+    "aiosqlite>=0.20",
+    "pytest-playwright>=0.6",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "domain*", "config*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

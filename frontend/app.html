@@ -1,0 +1,2483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GridVerdict</title>
+  <link rel="stylesheet" href="/static/css/theme.css" />
+  <link rel="stylesheet" href="/static/css/components.css" />
+</head>
+<body>
+<div id="root"
+     x-data="gridverdictApp()"
+     x-init="init()"
+     style="height:100vh; display:flex; flex-direction:column;">
+
+  <!-- ── Login overlay ──────────────────────────────────────── -->
+  <div x-show="auth.showLogin"
+       style="position:fixed;inset:0;z-index:100;background:var(--bg-base);
+              display:flex;align-items:center;justify-content:center;">
+    <div class="card" style="width:360px;">
+      <div class="card__header">
+        <span class="logo">Grid<span>Verdict</span></span>
+        <span class="badge badge--oos" style="font-size:10px;">RESEARCH ONLY</span>
+      </div>
+      <div class="card__body" style="display:flex;flex-direction:column;gap:12px;">
+        <p style="font-size:13px;color:var(--text-muted);">Evidence-grounded NEM decision support. Not financial advice.</p>
+        <input class="input" type="email" placeholder="Email" x-model="auth.loginEmail"
+               @keydown.enter="doLogin()" />
+        <input class="input" type="password" placeholder="Password (min 8 chars)" x-model="auth.loginPassword"
+               @keydown.enter="doLogin()" />
+        <div x-show="auth.loginError" style="color:var(--verdict-insufficient);font-size:12px;" x-text="auth.loginError"></div>
+        <button class="btn btn--primary" style="justify-content:center;" @click="doLogin()" :disabled="auth.loading">
+          <span x-show="auth.loading" class="spinner"></span>
+          <span x-text="auth.loading ? 'Signing in…' : 'Sign in'"></span>
+        </button>
+        <p style="font-size:11px;color:var(--text-muted);text-align:center;">
+          Dev mode: set <code>GRIDVERDICT_DEV_NO_AUTH=true</code> to skip auth.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Top bar ────────────────────────────────────────────── -->
+  <div id="topbar" x-show="!auth.showLogin">
+    <div class="logo">Grid<span>Verdict</span></div>
+
+    <!-- Region selector -->
+    <select class="select" x-model="region" @change="refreshMarket(); refreshMarketHistory(); refreshForecast(); _startSSE()">
+      <template x-for="r in regions" :key="r">
+        <option :value="r" x-text="r"></option>
+      </template>
+    </select>
+
+    <!-- Data coverage chip -->
+    <template x-if="coverage[region]">
+      <span :class="coverageChipClass(region)"
+            :title="`${coverage[region].days} days of dispatch data (${coverage[region].status})`"
+            x-text="coverageLabel(region)"></span>
+    </template>
+
+    <!-- Live market strip -->
+    <div class="market-strip">
+      <template x-if="market.price_rrp !== null">
+        <div style="display:flex;align-items:center;gap:12px;">
+          <span class="live-dot"
+                :class="market.is_stale ? 'live-dot--stale' : 'live-dot--fresh'"></span>
+          <span class="mono" style="font-size:15px;font-weight:700;"
+                :style="`color:${priceColor(market.regime)}`"
+                x-text="`$${market.price_rrp?.toFixed(2)}/MWh`"></span>
+          <span class="regime-badge"
+                :class="regimeBadgeClass(market.regime)"
+                x-text="(market.regime || 'normal').toUpperCase()"></span>
+          <span style="font-size:11px;color:var(--text-muted);"
+                x-text="market.is_stale ? `⚠ stale ${market.staleness_seconds}s` : `${market.staleness_seconds}s ago`"></span>
+        </div>
+      </template>
+      <template x-if="market.price_rrp === null">
+        <div style="display:flex;align-items:center;gap:8px;color:var(--text-muted);font-size:13px;">
+          <span class="spinner"></span> Loading…
+        </div>
+      </template>
+    </div>
+
+    <!-- Model status pills -->
+    <template x-if="modelStatus?.models">
+      <div class="model-pills">
+        <template x-for="[name, info] in Object.entries(modelStatus.models)" :key="name">
+          <div class="model-pill"
+               :class="info.available ? 'model-pill--ok' : 'model-pill--fail'"
+               :title="`${name.toUpperCase()}: ${info.available ? 'available' : (info.reason || 'unavailable')}`">
+            <span x-text="name.toUpperCase()"></span>
+            <span x-text="info.available ? '✓' : '✗'"></span>
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <!-- SSE connection indicator -->
+    <div class="sse-indicator"
+         :class="sseConnected ? 'sse-indicator--live' : 'sse-indicator--offline'"
+         :title="sseConnected ? 'Live event stream connected' : 'Live stream reconnecting…'">
+      <span class="sse-dot"></span>
+      <span x-text="sseConnected ? 'LIVE' : 'OFF'"></span>
+    </div>
+
+    <div class="spacer"></div>
+
+    <!-- Refresh + user -->
+    <div class="user-area">
+      <button class="btn btn--ghost btn--icon"
+              @click="refreshMarket(); refreshMarketHistory(); refreshForecast()"
+              title="Refresh market data">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M23 4v6h-6M1 20v-6h6"/>
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+        </svg>
+      </button>
+      <span style="font-size:12px;color:var(--text-muted);" x-text="auth.email"></span>
+      <button class="btn btn--ghost" style="font-size:12px;padding:4px 10px;" @click="doLogout()">Sign out</button>
+    </div>
+  </div>
+
+  <!-- ── App shell ──────────────────────────────────────────── -->
+  <div id="app-shell" x-show="!auth.showLogin">
+
+    <!-- ── Chat pane (left) ──────────────────────────────────── -->
+    <div id="chat-pane">
+
+      <!-- Session bar -->
+      <div id="session-bar">
+        <button class="btn btn--ghost" style="flex:1;font-size:12px;justify-content:flex-start;gap:6px;"
+                @click="sessionsOpen = !sessionsOpen">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          <span x-text="sessions.length ? `${sessions.length} session${sessions.length > 1 ? 's' : ''}` : 'Sessions'"></span>
+          <span x-text="sessionsOpen ? '▲' : '▼'" style="margin-left:auto;font-size:10px;color:var(--text-muted);"></span>
+        </button>
+        <button class="btn btn--primary btn--icon" @click="newSession()" title="New session">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Session list dropdown -->
+      <div id="session-list" :class="sessionsOpen ? 'open' : ''">
+        <template x-if="sessions.length === 0">
+          <div style="padding:12px;color:var(--text-muted);font-size:12px;text-align:center;">No sessions yet — type a query to start.</div>
+        </template>
+        <template x-for="s in sessions" :key="s.id">
+          <div class="session-item"
+               :class="s.id === currentSessionId ? 'session-item--active' : ''"
+               @click="switchSession(s.id)">
+            <span x-text="s.title || `Session ${s.region} — ${new Date(s.created_at).toLocaleDateString('en-AU')}`"></span>
+          </div>
+        </template>
+      </div>
+
+      <!-- Messages -->
+      <div id="messages">
+        <template x-if="messages.length === 0">
+          <div style="margin:auto;text-align:center;color:var(--text-muted);font-size:13px;padding:32px 16px;">
+            <div style="font-size:28px;margin-bottom:12px;opacity:0.3;">⚡</div>
+            <div style="font-weight:600;color:var(--text-secondary);margin-bottom:8px;">Ask about the NEM</div>
+            <div style="font-size:12px;line-height:1.6;">
+              Try: <em>"What is the current NSW price?"</em><br>
+              or <em>"Should I dispatch right now?"</em><br>
+              or <em>"Why is SA price elevated?"</em>
+            </div>
+          </div>
+        </template>
+
+        <template x-for="msg in messages" :key="msg.id">
+          <div style="display:flex;" :style="msg.role === 'user' ? 'justify-content:flex-end' : 'justify-content:flex-start'">
+            <div class="bubble" :class="`bubble--${msg.role}`">
+              <template x-if="msg.role === 'user'">
+                <span x-text="msg.text"></span>
+              </template>
+              <template x-if="msg.role === 'assistant'">
+                <div>
+                  <div x-text="msg.text" style="margin-bottom:8px;white-space:pre-line;"></div>
+                  <template x-if="msg.verdict">
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;">
+                      <span class="badge" :class="verdictBadgeClass(msg.verdict.verdict)" x-text="msg.verdict.verdict?.replace(/_/g,' ')"></span>
+                      <span class="action-chip" :class="actionChipClass(msg.verdict.action)" x-text="msg.verdict.action?.replace('_',' ')"></span>
+                      <span style="font-size:11px;color:var(--text-muted);" x-text="`${Math.round((msg.verdict.confidence||0)*100)}% conf`"></span>
+                      <button class="btn btn--ghost" style="font-size:11px;padding:2px 8px;"
+                              @click="viewport.data = {verdict: msg.verdict}; viewport.type = 'answer'; viewport.activeTab = 'answer'">
+                        See answer →
+                      </button>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <template x-if="msg.role === 'system'">
+                <span x-text="msg.text"></span>
+              </template>
+            </div>
+          </div>
+        </template>
+
+        <template x-if="queryLoading">
+          <div style="display:flex;justify-content:flex-start;">
+            <div class="bubble bubble--assistant" style="display:flex;align-items:center;gap:8px;color:var(--text-muted);">
+              <span class="spinner"></span> Analysing…
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- Input area -->
+      <div id="input-area">
+        <textarea id="query-input"
+                  class="input"
+                  placeholder="Ask about the NEM market…"
+                  rows="1"
+                  x-model="queryText"
+                  @keydown="handleInputKey($event)"
+                  @input="$el.style.height='auto'; $el.style.height=$el.scrollHeight+'px'"
+                  :disabled="queryLoading"></textarea>
+        <button class="btn btn--primary btn--icon"
+                @click="submitQuery()"
+                :disabled="queryLoading || !queryText.trim()"
+                title="Send (Enter)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="22" y1="2" x2="11" y2="13"/>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- ── Viewport pane (right) ─────────────────────────────── -->
+    <div id="viewport-pane">
+
+      <!-- Tab bar: 5 tabs -->
+      <div id="viewport-tab-bar">
+        <div class="vp-tab" :class="viewport.activeTab==='market'?'vp-tab--active':''"
+             @click="switchViewportTab('market')">Live Market</div>
+        <div class="vp-tab" :class="viewport.activeTab==='answer'?'vp-tab--active':''"
+             @click="switchViewportTab('answer')">Answer</div>
+        <div class="vp-tab" :class="viewport.activeTab==='sources'?'vp-tab--active':''"
+             @click="switchViewportTab('sources'); refreshFuelMix(); refreshConstraints()">Sources</div>
+        <div class="vp-tab" :class="viewport.activeTab==='models'?'vp-tab--active':''"
+             @click="switchViewportTab('models'); refreshModelStatus()">Models</div>
+        <div class="vp-tab" :class="viewport.activeTab==='data'?'vp-tab--active':''"
+             @click="switchViewportTab('data'); refreshDataStatus()">Data</div>
+        <div class="vp-tab" :class="viewport.activeTab==='audit'?'vp-tab--active':''"
+             @click="switchViewportTab('audit')">Audit</div>
+        <div class="vp-tab" :class="viewport.activeTab==='portfolio'?'vp-tab--active':''"
+             @click="switchViewportTab('portfolio'); prefillBessMarket()">Portfolio</div>
+        <div class="vp-tab" :class="viewport.activeTab==='brief'?'vp-tab--active':''"
+             @click="switchViewportTab('brief'); refreshIncidentBrief()">Incident Brief</div>
+        <div class="vp-tab" :class="viewport.activeTab==='livefeed'?'vp-tab--active':''"
+             @click="switchViewportTab('livefeed')"
+             style="position:relative;">
+          Live Feed
+          <span x-show="commentary.unreadCount > 0"
+                x-text="commentary.unreadCount > 9 ? '9+' : commentary.unreadCount"
+                style="position:absolute;top:2px;right:2px;background:#dc2626;color:#fff;
+                       border-radius:9px;font-size:9px;padding:1px 4px;line-height:1.4;
+                       min-width:14px;text-align:center;"></span>
+        </div>
+      </div>
+
+      <!-- Content area -->
+      <div id="viewport-content">
+
+        <!-- Loading overlay -->
+        <template x-if="viewport.loading">
+          <div class="vp-loading">
+            <div class="spinner"></div>
+            <span>Processing query…</span>
+          </div>
+        </template>
+
+        <!-- ── Panel: Live Market ──────────────────────────────── -->
+        <div class="vp-panel" :class="viewport.activeTab==='market' && !viewport.loading ? 'active' : ''">
+          <template x-if="market.price_rrp !== null">
+            <div id="vp-market">
+              <div class="stat-card">
+                <div class="stat-card__label">Dispatch Price</div>
+                <div class="stat-card__value mono"
+                     :style="`color:${priceColor(market.regime)}`"
+                     x-text="`$${market.price_rrp?.toFixed(2)}`"></div>
+                <div class="stat-card__sub">/MWh — <span x-text="market.is_stale ? 'STALE' : 'LIVE'"></span></div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card__label">Regime</div>
+                <div class="stat-card__value">
+                  <span class="regime-badge" :class="regimeBadgeClass(market.regime)"
+                        x-text="(market.regime||'normal').toUpperCase()" style="font-size:16px;padding:4px 12px;"></span>
+                </div>
+                <div class="stat-card__sub" x-text="`${region} — as at ${formatTime(new Date().toISOString())}`"></div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-card__label">Data Age</div>
+                <div class="stat-card__value mono"
+                     :style="market.is_stale ? 'color:var(--verdict-insufficient)' : 'color:var(--verdict-supported)'"
+                     x-text="`${market.staleness_seconds ?? '—'}s`"></div>
+                <div class="stat-card__sub" x-text="market.is_stale ? 'Stale — check NEMWeb' : 'Fresh dispatch data'"></div>
+              </div>
+              <div class="chart-controls">
+                <div class="segmented">
+                  <template x-for="r in chartRanges" :key="r">
+                    <button class="segmented__btn"
+                            :class="chartRange === r ? 'segmented__btn--active' : ''"
+                            @click="setChartRange(r)"
+                            x-text="r"></button>
+                  </template>
+                </div>
+                <div class="segmented">
+                  <template x-for="b in chartBuckets" :key="b">
+                    <button class="segmented__btn"
+                            :class="chartBucket === b ? 'segmented__btn--active' : ''"
+                            @click="setChartBucket(b)"
+                            x-text="b"></button>
+                  </template>
+                </div>
+              </div>
+              <div class="forecast-status" :class="forecastStatus?.available ? 'forecast-status--available' : 'forecast-status--unavailable'">
+                <span x-show="forecastLoading" class="spinner"></span>
+                <template x-if="forecastStatus?.available">
+                  <span x-text="`Forecast: ${forecastStatus.forecasts.map(f => f.model.toUpperCase()).join(', ')} · primary ${forecastStatus.primary_model?.toUpperCase()} · as of ${formatTime(forecastStatus.as_of)}`"></span>
+                </template>
+                <template x-if="forecastStatus && !forecastStatus.available">
+                  <span x-text="`Forecast unavailable: ${forecastStatus.reason || 'no live model output'}`"></span>
+                </template>
+                <template x-if="!forecastStatus">
+                  <span>Loading forecast from live model service…</span>
+                </template>
+              </div>
+              <div id="chart-price"></div>
+            </div>
+          </template>
+          <template x-if="market.price_rrp === null">
+            <div class="vp-loading">
+              <div class="spinner"></div>
+              <span>Fetching live data from NEMWeb…</span>
+            </div>
+          </template>
+        </div>
+
+        <!-- ── Panel: Answer (Verdict + Why merged) ───────────── -->
+        <div class="vp-panel" :class="viewport.activeTab==='answer' && !viewport.loading ? 'active' : ''">
+          <template x-if="viewport.data?.verdict">
+            <div id="vp-answer">
+
+              <!-- Evidence Quality Strip -->
+              <template x-if="viewport.data?.evidence_quality">
+                <div class="eq-strip">
+                  <span class="eq-strip__label">Evidence</span>
+
+                  <!-- Dispatch -->
+                  <div class="eq-chip"
+                       :class="`eq-chip--${viewport.data.evidence_quality.dispatch?.status || 'offline'}`"
+                       :title="`Dispatch: ${viewport.data.evidence_quality.dispatch?.status}`">
+                    <span class="eq-dot"></span>
+                    <span>Dispatch</span>
+                    <span class="eq-val"
+                          x-text="viewport.data.evidence_quality.dispatch?.status === 'fresh'
+                            ? `${viewport.data.evidence_quality.dispatch.staleness_seconds}s`
+                            : (viewport.data.evidence_quality.dispatch?.status || 'offline').toUpperCase()"></span>
+                  </div>
+
+                  <!-- Notices -->
+                  <div class="eq-chip"
+                       :class="`eq-chip--${viewport.data.evidence_quality.notices?.status || 'none'}`"
+                       :title="`Notices: ${viewport.data.evidence_quality.notices?.count} found`">
+                    <span class="eq-dot"></span>
+                    <span>Notices</span>
+                    <span class="eq-val"
+                          x-text="viewport.data.evidence_quality.notices?.count > 0
+                            ? viewport.data.evidence_quality.notices.count
+                            : '0'"></span>
+                  </div>
+
+                  <!-- Analogs -->
+                  <div class="eq-chip"
+                       :class="`eq-chip--${viewport.data.evidence_quality.analogs?.status || 'none'}`"
+                       :title="`Analogs: ${viewport.data.evidence_quality.analogs?.count} matched`">
+                    <span class="eq-dot"></span>
+                    <span>Analogs</span>
+                    <span class="eq-val"
+                          x-text="viewport.data.evidence_quality.analogs?.count > 0
+                            ? viewport.data.evidence_quality.analogs.count
+                            : (viewport.data.evidence_quality.analogs?.status || 'none').toUpperCase()"></span>
+                  </div>
+
+                  <!-- TemporalRAG -->
+                  <div class="eq-chip"
+                       :class="`eq-chip--${viewport.data.evidence_quality.temporal_rag?.count > 0 ? 'ok' : 'none'}`"
+                       :title="`TemporalRAG: ${viewport.data.evidence_quality.temporal_rag?.count} docs retrieved`">
+                    <span class="eq-dot"></span>
+                    <span>TRAG</span>
+                    <span class="eq-val" x-text="`${viewport.data.evidence_quality.temporal_rag?.count || 0}`"></span>
+                  </div>
+
+                  <!-- Constraints -->
+                  <div class="eq-chip"
+                       :class="`eq-chip--${viewport.data.evidence_quality.constraints?.count > 0 ? 'ok' : 'none'}`"
+                       :title="`Constraints: ${viewport.data.evidence_quality.constraints?.count} binding`">
+                    <span class="eq-dot"></span>
+                    <span>Constraints</span>
+                    <span class="eq-val"
+                          x-text="viewport.data.evidence_quality.constraints?.count > 0
+                            ? viewport.data.evidence_quality.constraints.count + ' binding'
+                            : 'no data'"></span>
+                  </div>
+
+                  <!-- Model chips -->
+                  <div class="eq-chip"
+                       :class="`eq-chip--${viewport.data.evidence_quality.models?.lear ? 'ok' : 'fail'}`"
+                       title="LEAR linear autoregressive forecast">
+                    <span class="eq-dot"></span>
+                    <span>LEAR</span>
+                  </div>
+                  <div class="eq-chip"
+                       :class="`eq-chip--${viewport.data.evidence_quality.models?.qra ? 'ok' : 'fail'}`"
+                       title="QRA quantile regression average">
+                    <span class="eq-dot"></span>
+                    <span>QRA</span>
+                  </div>
+                  <div class="eq-chip"
+                       :class="`eq-chip--${viewport.data.evidence_quality.models?.lnn ? 'ok' : 'fail'}`"
+                       title="LNN liquid neural network (quantile)">
+                    <span class="eq-dot"></span>
+                    <span>LNN</span>
+                  </div>
+
+                  <!-- Source coverage -->
+                  <span style="margin-left:auto;font-size:10px;color:var(--text-muted);"
+                        x-text="`${Math.round((viewport.data.evidence_quality.source_coverage||0)*100)}% coverage`"></span>
+                </div>
+              </template>
+
+              <!-- Data Provenance Panel -->
+              <template x-if="viewport.data?.provenance?.length">
+                <div class="card" style="padding:0;">
+                  <div class="card__header" style="cursor:pointer;"
+                       @click="answerExpanded.provenance = !answerExpanded.provenance">
+                    <span class="card__label">Data Provenance</span>
+                    <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">per-source freshness &amp; confidence</span>
+                    <span class="collapsible-arrow" style="margin-left:auto;"
+                          :class="answerExpanded.provenance ? 'collapsible-arrow--open' : ''">›</span>
+                  </div>
+                  <div x-show="answerExpanded.provenance">
+                    <div class="provenance-table">
+                      <template x-for="src in viewport.data.provenance" :key="src.source">
+                        <div>
+                          <div class="provenance-row">
+                            <span class="provenance-source"
+                                  :title="src.source"
+                                  x-text="src.source.replace(/_/g,' ')"></span>
+                            <span class="prov-badge"
+                                  :class="`prov-badge--${src.coverage_status || 'unavailable'}`"
+                                  x-text="(src.coverage_status || 'N/A').toUpperCase()"></span>
+                            <span class="prov-freshness"
+                                  :class="src.freshness_s <= 300 ? 'prov-fresh' : src.freshness_s <= 900 ? 'prov-stale' : 'prov-old'"
+                                  x-text="src.freshness_s != null ? `${Math.round(src.freshness_s)}s ago` : '—'"></span>
+                            <span class="prov-confidence"
+                                  :title="`Confidence: ${Math.round((src.confidence||0)*100)}%`"
+                                  x-text="src.confidence != null ? `${Math.round(src.confidence*100)}%` : '—'"></span>
+                          </div>
+                          <div x-show="src.error" class="prov-error"
+                               style="padding-left:16px;"
+                               x-text="src.error"></div>
+                        </div>
+                      </template>
+                    </div>
+                    <div style="padding:0 16px 8px;font-size:10px;color:var(--text-muted);">
+                      Freshness: <span style="color:var(--verdict-supported);">●</span> fresh (&lt;5m)
+                      <span style="color:var(--verdict-low);">●</span> stale (5–15m)
+                      <span style="color:var(--verdict-insufficient);">●</span> old (&gt;15m)
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Verdict Hero -->
+              <div class="verdict-hero">
+                <div style="flex:1;min-width:240px;">
+                  <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px;">GridVerdict</div>
+                  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
+                    <span class="badge" style="font-size:13px;padding:4px 12px;"
+                          :class="verdictBadgeClass(viewport.data.verdict.verdict)"
+                          x-text="viewport.data.verdict.verdict?.replace(/_/g,' ')"></span>
+                    <span class="action-chip" style="font-size:14px;"
+                          :class="actionChipClass(viewport.data.verdict.action)"
+                          x-text="viewport.data.verdict.action?.replace('_',' ').toUpperCase()"></span>
+                  </div>
+                  <div style="margin-bottom:8px;">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                      <span style="font-size:12px;color:var(--text-muted);">Confidence</span>
+                      <span class="mono" style="font-size:12px;" x-text="confPct(viewport.data.verdict.confidence)"></span>
+                    </div>
+                    <div class="conf-bar">
+                      <div class="conf-bar__fill"
+                           :class="confFillClass(viewport.data.verdict.confidence_band)"
+                           :style="`width:${confPct(viewport.data.verdict.confidence)}`"></div>
+                    </div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:4px;"
+                         x-text="`${(viewport.data.verdict.confidence_band||'').replace('_',' ').toUpperCase()} — as of ${formatTime(viewport.data.verdict.as_of)}`"></div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Analysis + Counterargument -->
+              <div class="card">
+                <div class="card__header"><span class="card__label">Analysis</span></div>
+                <template x-if="viewport.data.verdict.answer_sections?.length">
+                  <div class="card__body" style="display:grid;gap:10px;">
+                    <template x-for="section in viewport.data.verdict.answer_sections" :key="section.title">
+                      <div style="border-left:3px solid var(--border-strong);padding-left:10px;">
+                        <div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:4px;"
+                             x-text="section.title"></div>
+                        <template x-if="section.items?.length">
+                          <ul style="margin:0;padding-left:16px;font-size:13px;line-height:1.55;">
+                            <template x-for="item in section.items" :key="item">
+                              <li x-text="item"></li>
+                            </template>
+                          </ul>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <template x-if="!viewport.data.verdict.answer_sections?.length">
+                  <div class="card__body" style="font-size:13px;line-height:1.7;"
+                       x-text="viewport.data.verdict.why_plain_english"></div>
+                </template>
+              </div>
+
+              <!-- Causality Confidence Tier Table -->
+              <template x-if="viewport.data.verdict.driver_tiers?.length">
+                <div class="card" style="padding:0;">
+                  <div class="card__header" style="cursor:pointer;" @click="answerExpanded.causalityTiers = !answerExpanded.causalityTiers">
+                    <span class="card__label">Causality Confidence</span>
+                    <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">per-source driver tier</span>
+                    <span class="collapsible-arrow" style="margin-left:auto;" :class="answerExpanded.causalityTiers ? 'collapsible-arrow--open' : ''">›</span>
+                  </div>
+                  <div x-show="answerExpanded.causalityTiers" style="padding:0 4px 8px;">
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px;">
+                      <template x-for="dt in viewport.data.verdict.driver_tiers" :key="dt.label">
+                        <div :class="`driver-tier driver-tier--${dt.tier}`"
+                             :title="`${dt.label}: ${dt.note || ''}`">
+                          <span class="driver-tier__dot"></span>
+                          <span class="driver-tier__label" x-text="dt.label.replace(/_/g,' ')"></span>
+                          <span class="driver-tier__tier" x-text="dt.tier.toUpperCase().slice(0,4)"></span>
+                        </div>
+                      </template>
+                    </div>
+                    <div style="padding:0 10px 4px;display:flex;gap:16px;flex-wrap:wrap;">
+                      <span style="font-size:10px;color:var(--text-muted);">
+                        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--tier-confirmed);margin-right:3px;vertical-align:middle;"></span>CONF = direct telemetry
+                      </span>
+                      <span style="font-size:10px;color:var(--text-muted);">
+                        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--tier-supported);margin-right:3px;vertical-align:middle;"></span>SUPP = archived evidence
+                      </span>
+                      <span style="font-size:10px;color:var(--text-muted);">
+                        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--tier-plausible);margin-right:3px;vertical-align:middle;"></span>PLAU = pattern/model signal
+                      </span>
+                      <span style="font-size:10px;color:var(--text-muted);">
+                        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--tier-unconfirmed);margin-right:3px;vertical-align:middle;"></span>UNCO = no backing data
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Market Incident Timeline -->
+              <template x-if="incidentTimeline || incidentTimelineLoading">
+                <div class="card" style="padding:0;">
+                  <div class="card__header" style="cursor:pointer;"
+                       @click="answerExpanded.incidentTimeline = !answerExpanded.incidentTimeline">
+                    <span class="card__label">Market Incident Timeline</span>
+                    <template x-if="incidentTimeline">
+                      <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">
+                        <span x-text="region"></span>
+                        <span x-show="incidentTimeline.anchor_price != null">
+                          · $<span x-text="(incidentTimeline.anchor_price||0).toFixed(0)"></span>/MWh
+                        </span>
+                        · <span :class="`driver-tier driver-tier--${incidentTimeline.coverage_grade === 'full' ? 'confirmed' : incidentTimeline.coverage_grade === 'partial' ? 'supported' : 'unconfirmed'}`"
+                                style="display:inline-flex;padding:1px 6px;font-size:10px;">
+                            <span class="driver-tier__dot"></span>
+                            <span x-text="(incidentTimeline.coverage_grade||'minimal').toUpperCase()"></span>
+                          </span>
+                      </span>
+                    </template>
+                    <span x-show="incidentTimelineLoading" style="font-size:11px;color:var(--text-muted);margin-left:8px;">loading…</span>
+                    <span class="collapsible-arrow" style="margin-left:auto;"
+                          :class="answerExpanded.incidentTimeline ? 'collapsible-arrow--open' : ''">›</span>
+                  </div>
+
+                  <div x-show="answerExpanded.incidentTimeline">
+                    <template x-if="incidentTimeline?.events?.length">
+                      <div>
+                        <!-- Event rows -->
+                        <div style="padding:4px 0;">
+                          <template x-for="ev in incidentTimeline.events" :key="ev.event_id">
+                            <div class="timeline-event"
+                                 :class="`timeline-event--${ev.tier}${ev.missing ? ' timeline-event--missing' : ''}`">
+                              <div class="timeline-event__time"
+                                   x-text="ev.interval ? ev.interval.slice(11,16) : '—'"></div>
+                              <div class="timeline-event__body">
+                                <div class="timeline-event__desc" x-text="ev.description"></div>
+                                <div class="timeline-event__evidence"
+                                     x-show="ev.evidence_summary"
+                                     x-text="`Evidence: ${ev.evidence_summary}`"></div>
+                              </div>
+                              <div class="timeline-event__tier">
+                                <span :class="`driver-tier driver-tier--${ev.tier}`"
+                                      style="font-size:10px;padding:2px 6px;">
+                                  <span class="driver-tier__dot"></span>
+                                  <span x-text="ev.tier.toUpperCase().slice(0,4)"></span>
+                                </span>
+                              </div>
+                            </div>
+                          </template>
+                        </div>
+
+                        <!-- Verdict strip -->
+                        <div style="padding:8px 12px;border-top:1px solid var(--border-subtle);background:var(--bg-card);">
+                          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--text-muted);margin-bottom:6px;">Incident Verdict</div>
+                          <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:11px;">
+                            <template x-if="incidentTimeline.verdict.confirmed?.length">
+                              <div>
+                                <span style="color:var(--tier-confirmed);font-weight:700;">Confirmed</span>
+                                <span style="color:var(--text-muted);">— price + demand/availability state</span>
+                              </div>
+                            </template>
+                            <template x-if="incidentTimeline.verdict.supported?.length">
+                              <div>
+                                <span style="color:var(--tier-supported);font-weight:700;">Supported</span>
+                                <span style="color:var(--text-muted);">— constraint/interconnector if ingested</span>
+                              </div>
+                            </template>
+                            <template x-if="incidentTimeline.verdict.plausible?.length">
+                              <div>
+                                <span style="color:var(--tier-plausible);font-weight:700;">Plausible</span>
+                                <span style="color:var(--text-muted);">— weather/forecast/analog pattern</span>
+                              </div>
+                            </template>
+                            <template x-if="incidentTimeline.verdict.missing_coverage?.length">
+                              <div>
+                                <span style="color:var(--tier-unconfirmed);font-weight:700;">Unconfirmed</span>
+                                <span style="color:var(--text-muted);"
+                                      x-text="`— ${incidentTimeline.verdict.missing_coverage.join(', ')} not ingested`"></span>
+                              </div>
+                            </template>
+                          </div>
+                        </div>
+
+                        <!-- Manual refresh control -->
+                        <div style="padding:6px 12px;display:flex;align-items:center;gap:8px;">
+                          <button class="btn btn--ghost" style="font-size:11px;padding:2px 8px;"
+                                  @click="refreshIncidentTimeline()">
+                            Refresh timeline
+                          </button>
+                          <span style="font-size:10px;color:var(--text-muted);"
+                                x-text="incidentTimeline.as_of ? `as of ${incidentTimeline.as_of.slice(11,19)}Z` : ''"></span>
+                        </div>
+                      </div>
+                    </template>
+
+                    <template x-if="!incidentTimeline?.events?.length && !incidentTimelineLoading">
+                      <div style="padding:12px;color:var(--text-muted);font-size:12px;">
+                        No timeline data — dispatch history not yet ingested for this interval.
+                        <button class="btn btn--ghost" style="margin-left:8px;font-size:11px;"
+                                @click="refreshIncidentTimeline()">Try now</button>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <div class="counterarg">
+                <div class="counterarg__label">⚠ Counterargument</div>
+                <div x-text="viewport.data.verdict.counterargument"></div>
+              </div>
+
+              <!-- Seasonal summary (retrospective intent) -->
+              <template x-if="viewport.data.seasonal_summary?.length">
+                <div class="card">
+                  <div class="card__header"><span class="card__label">Seasonal History</span></div>
+                  <div class="card__body">
+                    <template x-for="s in viewport.data.seasonal_summary" :key="s.bucket_label || s.season">
+                      <div class="ev-row">
+                        <span style="font-weight:600;min-width:80px;" x-text="s.bucket_label || s.season"></span>
+                        <span class="mono" style="font-size:12px;" x-text="`$${Number(s.avg_price||0).toFixed(2)}/MWh avg`"></span>
+                        <span style="font-size:11px;color:var(--text-muted);" x-text="`${s.interval_count || 0} intervals`"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Source recommendation (inline from fuel_mix) -->
+              <template x-if="viewport.data?.fuel_mix?.recommendation">
+                <div class="card" style="border-left:3px solid var(--verdict-supported);">
+                  <div class="card__header">
+                    <span class="card__label">Source Recommendation</span>
+                    <span style="font-size:11px;color:var(--text-muted);">Which fuel to buy now</span>
+                  </div>
+                  <div class="card__body">
+                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+                      <span style="font-weight:800;font-size:16px;" x-text="viewport.data.fuel_mix.recommendation.fuel_type?.toUpperCase()"></span>
+                      <span class="action-chip"
+                            :class="viewport.data.fuel_mix.recommendation.action === 'buy' ? 'action-chip--buy' : viewport.data.fuel_mix.recommendation.action === 'defer' ? 'action-chip--hold' : 'action-chip--monitor'"
+                            x-text="(viewport.data.fuel_mix.recommendation.action||'monitor').toUpperCase()"></span>
+                      <span class="badge"
+                            :class="viewport.data.fuel_mix.recommendation.confidence === 'high' ? 'badge--supported' : viewport.data.fuel_mix.recommendation.confidence === 'medium' ? 'badge--low' : 'badge--oos'"
+                            x-text="(viewport.data.fuel_mix.recommendation.confidence||'low').toUpperCase()"></span>
+                    </div>
+                    <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;"
+                         x-text="viewport.data.fuel_mix.recommendation.reason"></div>
+                    <template x-if="viewport.data.fuel_mix.recommendation.preferred_order?.length">
+                      <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">
+                        Order: <span x-text="viewport.data.fuel_mix.recommendation.preferred_order.join(' › ')"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Collapsible: Evidence Refs -->
+              <div class="collapsible-section">
+                <div class="collapsible-header" @click="toggleSection('evidence')">
+                  <span>
+                    Evidence Refs
+                    <span class="feature-status"
+                          :class="viewport.data.verdict.evidence_refs?.length ? 'feature-status--operational' : 'feature-status--unavailable'"
+                          x-text="`${viewport.data.verdict.evidence_refs?.length || 0} sources`"></span>
+                  </span>
+                  <span class="collapsible-arrow" :class="answerExpanded.evidence ? 'collapsible-arrow--open' : ''">›</span>
+                </div>
+                <div class="collapsible-body" x-show="answerExpanded.evidence">
+                  <template x-if="!viewport.data.verdict.evidence_refs?.length">
+                    <div style="color:var(--text-muted);font-size:12px;">No evidence refs — live data unavailable.</div>
+                  </template>
+                  <template x-for="ev in (viewport.data.verdict.evidence_refs || [])" :key="ev.id">
+                    <div class="ev-row">
+                      <span class="ev-source" x-text="ev.source"></span>
+                      <span class="ev-field" x-text="ev.field?.replace('_',' ')"></span>
+                      <span class="ev-value" x-text="evidenceValue(ev)"></span>
+                      <span style="color:var(--text-muted);font-size:11px;margin-left:auto;" x-text="formatTime(ev.interval)"></span>
+                    </div>
+                  </template>
+                  <!-- Confidence inputs summary -->
+                  <div class="metric-list" style="margin-top:12px;">
+                    <div><span>Evidence refs</span><strong x-text="viewport.data.verdict.evidence_refs?.length || 0"></strong></div>
+                    <div><span>Weather sources</span><strong x-text="viewport.data.verdict.weather_correlation?.source_count ?? 0"></strong></div>
+                    <div><span>Missing data</span><strong x-text="viewport.data.verdict.missing_data?.length || 0"></strong></div>
+                    <div><span>Decomp confidence</span><strong x-text="confPct(viewport.data.decomposition?.confidence)"></strong></div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Collapsible: Analogs -->
+              <div class="collapsible-section">
+                <div class="collapsible-header" @click="toggleSection('analogs')">
+                  <span>
+                    Historical Analogs (HippoGraph)
+                    <span class="feature-status"
+                          :class="viewport.data.verdict.historical_analogs?.count >= 3 ? 'feature-status--operational' : viewport.data.verdict.historical_analogs?.count > 0 ? 'feature-status--warming' : 'feature-status--unavailable'"
+                          x-text="viewport.data.verdict.historical_analogs?.count
+                            ? `${viewport.data.verdict.historical_analogs.count} matched`
+                            : 'no analogs'"></span>
+                  </span>
+                  <span class="collapsible-arrow" :class="answerExpanded.analogs ? 'collapsible-arrow--open' : ''">›</span>
+                </div>
+                <div class="collapsible-body" x-show="answerExpanded.analogs">
+                  <template x-if="viewport.data.analogs?.length">
+                    <div>
+                      <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;"
+                           x-text="`${viewport.data.analogs.length} similar historical states found · ${Math.round((viewport.data.verdict.historical_analogs?.success_count / Math.max(viewport.data.verdict.historical_analogs?.count||1,1))*100)}% resolved within 2 intervals`"></div>
+                      <div class="analog-table">
+                        <div class="analog-table__head">
+                          <span>Time</span>
+                          <span>Region</span>
+                          <span>Regime</span>
+                          <span>Price</span>
+                          <span>PPR</span>
+                          <span>Outcome</span>
+                        </div>
+                        <template x-for="a in (viewport.data.analogs || []).slice(0,5)" :key="a.node_id || `${a.valid_time}-${a.ppr_score}`">
+                          <div class="analog-table__row">
+                            <span x-text="formatDateTime(a.valid_time)"></span>
+                            <span x-text="a.region || region"></span>
+                            <span x-text="(a.regime || 'unknown').toUpperCase()"></span>
+                            <span class="mono" x-text="`$${Number(a.price_rrp || 0).toFixed(2)}`"></span>
+                            <span class="mono" x-text="Number(a.ppr_score || 0).toFixed(4)"></span>
+                            <span x-text="(a.outcome || 'not labelled').replace('_',' ')"></span>
+                          </div>
+                        </template>
+                      </div>
+                      <template x-if="viewport.data.analogs.length > 5">
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:4px;text-align:right;"
+                             x-text="`+${viewport.data.analogs.length - 5} more — see Audit tab for full scatter`"></div>
+                      </template>
+                    </div>
+                  </template>
+                  <template x-if="!viewport.data.analogs?.length">
+                    <div style="color:var(--text-muted);font-size:12px;">
+                      No analogs — HippoGraph warms after ~24h of live dispatch data.
+                    </div>
+                  </template>
+                </div>
+              </div>
+
+              <!-- Collapsible: TemporalRAG Evidence -->
+              <div class="collapsible-section">
+                <div class="collapsible-header" @click="toggleSection('temporal')">
+                  <span>
+                    TemporalRAG Evidence
+                    <span class="feature-status"
+                          :class="viewport.data.temporal_evidence?.length ? 'feature-status--operational' : 'feature-status--unavailable'"
+                          x-text="viewport.data.temporal_evidence?.length
+                            ? `${viewport.data.temporal_evidence.length} docs retrieved`
+                            : 'none'"></span>
+                    <span x-show="viewport.data.temporal_evidence?.length"
+                          style="display:inline-block;margin-left:6px;font-size:10px;color:var(--text-muted);font-weight:400;text-transform:none;letter-spacing:0;">
+                      Only evidence known before query time was used
+                    </span>
+                  </span>
+                  <span class="collapsible-arrow" :class="answerExpanded.temporal ? 'collapsible-arrow--open' : ''">›</span>
+                </div>
+                <div class="collapsible-body" x-show="answerExpanded.temporal" style="padding:0;">
+                  <template x-if="viewport.data.temporal_evidence?.length">
+                    <div>
+                      <template x-for="doc in viewport.data.temporal_evidence" :key="doc.doc_id">
+                        <div style="padding:8px 14px;border-bottom:1px solid var(--border-subtle);">
+                          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:3px;">
+                            <span class="badge"
+                                  :class="doc.source_type==='market_events' ? 'badge--supported' : doc.source_type==='notice' ? 'badge--spike' : 'badge--low-confidence'"
+                                  x-text="doc.source_type?.replace(/_/g,' ').toUpperCase()"></span>
+                            <!-- Known-before-query-time provenance badge -->
+                            <span :class="doc.known_before_query_time ? 'badge badge--supported' : 'badge badge--low-confidence'"
+                                  style="font-size:9px;padding:1px 5px;"
+                                  :title="doc.known_before_query_time ? 'Evidence was available before this query — no lookahead' : 'Evidence system_time is after query time — treat with caution'"
+                                  x-text="doc.known_before_query_time ? 'PRIOR' : 'POST'"></span>
+                            <span class="mono" style="font-size:10px;color:var(--text-muted);"
+                                  x-text="`rel ${Number(doc.relevance_score||0).toFixed(3)}`"></span>
+                            <span style="font-size:10px;color:var(--text-muted);margin-left:auto;"
+                                  x-text="formatTime(doc.valid_time)"></span>
+                          </div>
+                          <div style="font-size:11px;color:var(--text-secondary);line-height:1.5;" x-text="doc.citation"></div>
+                          <div style="display:flex;gap:12px;margin-top:2px;">
+                            <span style="font-size:10px;color:var(--text-muted);" x-text="`valid: ${formatTime(doc.valid_time)}`"></span>
+                            <span style="font-size:10px;color:var(--text-muted);" x-text="`sys: ${formatTime(doc.system_time)}`"></span>
+                            <span style="font-size:10px;color:var(--text-muted);" x-text="doc.retrieval_reason"></span>
+                          </div>
+                        </div>
+                      </template>
+                      <div style="padding:6px 14px;font-size:10px;color:var(--text-muted);">
+                        PRIOR = evidence system_time ≤ query time (no lookahead). POST = flagged for caution.
+                      </div>
+                    </div>
+                  </template>
+                  <template x-if="!viewport.data.temporal_evidence?.length">
+                    <div style="color:var(--text-muted);font-size:12px;padding:12px 14px;">No temporal documents retrieved for this query window.</div>
+                  </template>
+                </div>
+              </div>
+
+              <!-- Collapsible: Missing Data Gaps -->
+              <template x-if="viewport.data.verdict.missing_data?.length || viewport.data.verdict.known_missing_before_action?.length">
+                <div class="collapsible-section" style="border-color:rgba(245,158,11,.25);">
+                  <div class="collapsible-header" @click="toggleSection('missing')"
+                       style="color:var(--verdict-low);">
+                    <span>Missing Data Gaps
+                      <span style="display:inline-block;margin-left:4px;font-size:10px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--verdict-low);">
+                        <span x-text="`${(viewport.data.verdict.missing_data?.length || 0) + (viewport.data.verdict.known_missing_before_action?.length || 0)} gap${((viewport.data.verdict.missing_data?.length || 0) + (viewport.data.verdict.known_missing_before_action?.length || 0)) > 1 ? 's' : ''}`"></span>
+                      </span>
+                    </span>
+                    <span class="collapsible-arrow" :class="answerExpanded.missing ? 'collapsible-arrow--open' : ''">›</span>
+                  </div>
+                  <div class="collapsible-body" x-show="answerExpanded.missing">
+                    <template x-if="viewport.data.verdict.missing_data?.length">
+                      <div>
+                        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:4px;">Data quality issues</div>
+                        <ul class="missing-list">
+                          <template x-for="m in viewport.data.verdict.missing_data" :key="m">
+                            <li x-text="m"></li>
+                          </template>
+                        </ul>
+                      </div>
+                    </template>
+                    <template x-if="viewport.data.verdict.known_missing_before_action?.length">
+                      <div style="margin-top:10px;">
+                        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:4px;">Resolve before acting</div>
+                        <ul class="missing-list">
+                          <template x-for="m in viewport.data.verdict.known_missing_before_action" :key="m">
+                            <li x-text="m"></li>
+                          </template>
+                        </ul>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Weather section (inline, no collapse) -->
+              <template x-if="viewport.data.verdict.weather_correlation?.source_count > 0">
+                <div class="why-section">
+                  <div class="why-section__header">
+                    Weather Consensus
+                    <span class="feature-status feature-status--operational"
+                          x-text="`${viewport.data.verdict.weather_correlation.source_count} sources`"></span>
+                  </div>
+                  <div class="why-section__body">
+                    <div class="metric-list">
+                      <div><span>Temp</span><strong x-text="metricValue(viewport.data.verdict.weather_correlation.consensus?.temperature_c, ' °C')"></strong></div>
+                      <div><span>Wind</span><strong x-text="metricValue(viewport.data.verdict.weather_correlation.consensus?.wind_speed_kmh, ' km/h')"></strong></div>
+                      <div><span>Cloud</span><strong x-text="metricValue(viewport.data.verdict.weather_correlation.consensus?.cloud_cover_pct, '%')"></strong></div>
+                      <div><span>Rain</span><strong x-text="metricValue(viewport.data.verdict.weather_correlation.consensus?.precipitation_mm, ' mm')"></strong></div>
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- ── Claim Map ──────────────────────────────────── -->
+              <template x-if="viewport.data.verdict.claim_map?.length">
+                <div class="card" style="padding:0;">
+                  <div class="card__header" style="cursor:pointer;"
+                       @click="answerExpanded.claimMap = !answerExpanded.claimMap">
+                    <span class="card__label">Claim Map</span>
+                    <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">
+                      <span x-text="viewport.data.verdict.claim_map.filter(c=>c.present).length"></span> supported ·
+                      <span x-text="viewport.data.verdict.claim_map.length"></span> total
+                    </span>
+                    <span class="collapsible-arrow" style="margin-left:auto;"
+                          :class="answerExpanded.claimMap ? 'collapsible-arrow--open' : ''">›</span>
+                  </div>
+                  <div x-show="answerExpanded.claimMap !== false" style="padding:8px 12px;display:flex;flex-direction:column;gap:6px;">
+                    <template x-for="cm in viewport.data.verdict.claim_map" :key="cm.claim_id">
+                      <div style="display:flex;align-items:flex-start;gap:8px;padding:6px 8px;border-radius:4px;background:var(--bg-elevated);">
+                        <!-- Tier badge -->
+                        <span :class="`driver-tier driver-tier--${cm.tier}`"
+                              style="font-size:10px;padding:2px 5px;white-space:nowrap;flex-shrink:0;">
+                          <span class="driver-tier__dot"></span>
+                          <span x-text="cm.tier.toUpperCase().slice(0,4)"></span>
+                        </span>
+                        <!-- Claim type chip -->
+                        <span style="font-size:10px;padding:2px 5px;border-radius:3px;background:rgba(148,163,184,.15);color:var(--text-muted);white-space:nowrap;flex-shrink:0;"
+                              x-text="cm.claim_type.replace(/_/g,' ')"></span>
+                        <!-- Label -->
+                        <span style="font-size:12px;color:var(--text-primary);flex:1;line-height:1.4;"
+                              x-text="cm.label"></span>
+                        <!-- Confidence -->
+                        <span style="font-size:10px;color:var(--text-muted);white-space:nowrap;flex-shrink:0;"
+                              x-text="`${Math.round((cm.confidence||0)*100)}%`"></span>
+                        <!-- Not-present indicator -->
+                        <template x-if="!cm.present">
+                          <span style="font-size:10px;color:var(--verdict-insufficient);flex-shrink:0;">missing</span>
+                        </template>
+                        <!-- Evidence link count -->
+                        <template x-if="cm.evidence_ref_ids?.length">
+                          <span :title="`Evidence refs: ${cm.evidence_ref_ids.join(', ')}`"
+                                style="font-size:10px;color:var(--text-muted);border:1px solid var(--border-subtle);border-radius:3px;padding:1px 4px;white-space:nowrap;flex-shrink:0;"
+                                x-text="`${cm.evidence_ref_ids.length} ref${cm.evidence_ref_ids.length > 1 ? 's' : ''}`"></span>
+                        </template>
+                      </div>
+                    </template>
+                    <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">
+                      Each claim is independently verifiable — tier reflects the strength of backing evidence.
+                    </div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- ── Next Watch ─────────────────────────────────── -->
+              <template x-if="viewport.data.verdict.next_watch?.length">
+                <div class="card" style="border-left:3px solid var(--verdict-low);padding:0;">
+                  <div class="card__header">
+                    <span class="card__label" style="color:var(--verdict-low);">Watch List</span>
+                    <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">
+                      <span x-text="viewport.data.verdict.next_watch.length"></span> threshold<span x-text="viewport.data.verdict.next_watch.length > 1 ? 's' : ''"></span>
+                    </span>
+                  </div>
+                  <ul style="margin:0;padding:8px 12px 10px 28px;display:flex;flex-direction:column;gap:6px;list-style:disc;">
+                    <template x-for="(item, idx) in viewport.data.verdict.next_watch" :key="idx">
+                      <li style="font-size:12px;color:var(--text-primary);line-height:1.5;" x-text="item"></li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+
+              <!-- Disclaimer -->
+              <div class="disclaimer" x-text="viewport.data.verdict.disclaimer"></div>
+            </div>
+          </template>
+
+          <!-- Empty state -->
+          <template x-if="!viewport.data?.verdict">
+            <div class="vp-loading" style="height:300px;">
+              <div style="text-align:center;color:var(--text-muted);font-size:13px;line-height:1.8;">
+                <div style="font-size:24px;opacity:0.2;margin-bottom:12px;">⚡</div>
+                Submit a query to see the answer.<br>
+                <span style="font-size:11px;">The Evidence Quality strip will show you what data was used and whether to trust it.</span>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <!-- ── Panel: Sources (Fuel Mix + Constraints) ─────────── -->
+        <div class="vp-panel" :class="viewport.activeTab==='sources' && !viewport.loading ? 'active' : ''">
+          <div id="vp-sources">
+
+            <!-- Best Buy recommendation -->
+            <template x-if="fuelMix?.recommendation">
+              <div class="verdict-hero" style="flex-direction:column;gap:12px;">
+                <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);">Best Buy Source Now</div>
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                  <span style="font-size:22px;font-weight:800;"
+                        x-text="fuelMix.recommendation.fuel_type?.toUpperCase()"></span>
+                  <span class="action-chip"
+                        :class="fuelMix.recommendation.action === 'buy' ? 'action-chip--buy' : fuelMix.recommendation.action === 'defer' ? 'action-chip--hold' : 'action-chip--monitor'"
+                        x-text="(fuelMix.recommendation.action || 'monitor').toUpperCase()"></span>
+                  <span class="badge"
+                        :class="fuelMix.recommendation.confidence === 'high' ? 'badge--supported' : fuelMix.recommendation.confidence === 'medium' ? 'badge--low' : 'badge--oos'"
+                        x-text="(fuelMix.recommendation.confidence || 'low').toUpperCase()"></span>
+                  <template x-if="fuelMix.spot_price_rrp !== null">
+                    <span class="mono" style="font-size:13px;color:var(--text-secondary);"
+                          x-text="`Spot $${fuelMix.spot_price_rrp?.toFixed(2)}/MWh`"></span>
+                  </template>
+                </div>
+                <div style="font-size:13px;line-height:1.6;color:var(--text-secondary);"
+                     x-text="fuelMix.recommendation.reason"></div>
+                <template x-if="fuelMix.recommendation.preferred_order?.length">
+                  <div style="font-size:11px;color:var(--text-muted);">
+                    Preferred order: <span x-text="fuelMix.recommendation.preferred_order.join(' › ')"></span>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- Fuel mix chart -->
+            <div class="why-section">
+              <div class="why-section__header">
+                Energy Source Mix
+                <span class="feature-status"
+                      :class="fuelMix?.data_tier === 'dispatch' ? 'feature-status--operational' : fuelMix?.data_tier === 'capacity' ? 'feature-status--warming' : 'feature-status--unavailable'"
+                      x-text="fuelMix?.data_tier ? `Data: ${fuelMix.data_tier}` : 'Loading…'"></span>
+              </div>
+              <div class="why-section__body" style="padding:0;">
+                <template x-if="fuelMixLoading">
+                  <div style="display:flex;align-items:center;gap:8px;color:var(--text-muted);padding:12px;"><span class="spinner"></span> Loading fuel mix…</div>
+                </template>
+                <div id="fuel-mix-chart" style="width:100%;height:340px;"></div>
+                <template x-if="fuelMix?.sources?.length">
+                  <div style="margin-top:12px;padding:0 12px 12px;">
+                    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:6px;">Per Source Detail</div>
+                    <template x-for="s in (fuelMix.sources || []).filter(s => (s.mw_capacity||0)>0 || (s.mw_dispatched||0)>0)" :key="s.fuel_type">
+                      <div class="ev-row" style="padding:6px 0;border-bottom:1px solid var(--border-subtle);">
+                        <span style="font-weight:600;min-width:70px;" x-text="s.fuel_type.toUpperCase()"></span>
+                        <template x-if="s.mw_dispatched !== null">
+                          <span class="mono" style="font-size:11px;" x-text="`${s.mw_dispatched} MW dispatched`"></span>
+                        </template>
+                        <template x-if="s.mw_dispatched === null && s.mw_capacity !== null">
+                          <span class="mono" style="font-size:11px;color:var(--text-muted);" x-text="`${s.mw_capacity} MW capacity`"></span>
+                        </template>
+                        <span style="font-size:11px;color:var(--text-muted);" x-text="`${s.unit_count} units`"></span>
+                        <span style="font-size:11px;margin-left:auto;" x-text="`MC $${s.marginal_cost_low}–$${s.marginal_cost_high}/MWh`"></span>
+                        <span class="badge"
+                              :class="s.volatility_index < 0.3 ? 'badge--supported' : s.volatility_index < 0.7 ? 'badge--low-confidence' : 'badge--spike'"
+                              x-text="s.volatility_index < 0.3 ? 'STABLE' : s.volatility_index < 0.7 ? 'MODERATE' : 'VOLATILE'"></span>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <template x-if="!fuelMix && !fuelMixLoading">
+                  <div style="color:var(--text-muted);font-size:12px;padding:12px;">No fuel mix data — DUDETAILSUMMARY metadata required.</div>
+                </template>
+              </div>
+            </div>
+
+            <!-- Constraint / interconnector timeline -->
+            <div class="why-section">
+              <div class="why-section__header" style="display:flex;align-items:center;gap:10px;">
+                Constraint &amp; Interconnector Timeline
+                <div class="segmented" style="margin-left:auto;">
+                  <template x-for="h in [2,4,12,24]" :key="h">
+                    <button class="segmented__btn"
+                            :class="constraintHours===h ? 'segmented__btn--active' : ''"
+                            @click="constraintHours=h; refreshConstraints()"
+                            x-text="`${h}h`"></button>
+                  </template>
+                </div>
+              </div>
+              <div class="why-section__body">
+                <template x-if="constraintLoading">
+                  <div style="display:flex;align-items:center;gap:8px;color:var(--text-muted);"><span class="spinner"></span> Loading constraints…</div>
+                </template>
+                <template x-if="!constraintLoading && constraintData?.data_available && constraintData.summary?.length">
+                  <div>
+                    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:6px;">
+                      Top binding elements — <span x-text="`${constraintData.event_count} intervals`"></span>
+                    </div>
+                    <template x-for="el in (constraintData.summary || []).slice(0,8)" :key="el.element_id">
+                      <div class="ev-row" style="padding:6px 0;border-bottom:1px solid var(--border-subtle);">
+                        <span class="badge"
+                              :class="el.driver_type === 'constraint' ? 'badge--spike' : 'badge--low-confidence'"
+                              x-text="el.driver_type === 'constraint' ? 'CON' : 'IC'"></span>
+                        <span style="font-size:12px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;max-width:200px;" x-text="el.element_id"></span>
+                        <span style="font-size:11px;color:var(--text-muted);" x-text="`${el.binding_intervals}/${el.intervals} binding`"></span>
+                        <template x-if="el.max_marginal_value > 0">
+                          <span class="mono" style="font-size:11px;margin-left:auto;" x-text="`MV $${el.max_marginal_value}/MWh`"></span>
+                        </template>
+                        <template x-if="el.max_flow_mw > 0">
+                          <span class="mono" style="font-size:11px;margin-left:auto;" x-text="`${el.max_flow_mw} MW`"></span>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <template x-if="!constraintLoading && constraintData && !constraintData.data_available">
+                  <div style="color:var(--text-muted);font-size:12px;" x-text="constraintData.note || 'No constraint data — archive backfill required.'"></div>
+                </template>
+                <template x-if="!constraintLoading && !constraintData">
+                  <div style="color:var(--text-muted);font-size:12px;">Click the Sources tab to load constraint data.</div>
+                </template>
+              </div>
+            </div>
+
+            <div class="disclaimer" x-text="fuelMix?.caveat || 'Source recommendation is decision-support only. Not financial advice.'"></div>
+          </div>
+        </div>
+
+        <!-- ── Panel: Models ──────────────────────────────────── -->
+        <div class="vp-panel" :class="viewport.activeTab==='models' && !viewport.loading ? 'active' : ''">
+          <div id="vp-models">
+            <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);margin-bottom:16px;">
+              Forecast Model Status — <span x-text="region"></span>
+            </div>
+
+            <template x-if="modelStatusLoading">
+              <div style="display:flex;align-items:center;gap:8px;color:var(--text-muted);"><span class="spinner"></span> Loading model status…</div>
+            </template>
+
+            <template x-if="modelStatus?.models">
+              <div>
+                <template x-for="[name, info] in Object.entries(modelStatus.models)" :key="name">
+                  <div class="card" style="margin-bottom:8px;">
+                    <div class="card__header">
+                      <span class="card__label" x-text="name.toUpperCase()"></span>
+                      <span class="badge"
+                            :class="info.available ? 'badge--supported' : 'badge--oos'"
+                            x-text="info.available ? 'AVAILABLE' : 'UNAVAILABLE'"></span>
+                    </div>
+                    <div class="card__body metric-list">
+                      <!-- Model type badge (point forecast vs probabilistic) -->
+                      <template x-if="info.model_type">
+                        <div>
+                          <span>Type</span>
+                          <strong>
+                            <span :class="`badge ${info.model_type==='point_forecast'?'badge--low':'badge--supported'}`"
+                                  x-text="info.model_type==='point_forecast'?'Point forecast (deterministic)':'Probabilistic (P10/P50/P90)'"></span>
+                          </strong>
+                        </div>
+                      </template>
+                      <template x-if="info.available">
+                        <div>
+                          <template x-if="info.last_trained_at">
+                            <div><span>Last trained</span><strong x-text="formatTime(info.last_trained_at)"></strong></div>
+                          </template>
+                          <!-- LNN-specific: checkpoint age and interval count -->
+                          <template x-if="info.checkpoint_age_hours != null">
+                            <div>
+                              <span>Checkpoint age</span>
+                              <strong :class="info.checkpoint_age_hours > 24 ? 'text-warn' : ''"
+                                      x-text="`${info.checkpoint_age_hours}h`"></strong>
+                            </div>
+                          </template>
+                          <template x-if="info.trained_on_intervals != null">
+                            <div><span>Trained on</span><strong x-text="`${info.trained_on_intervals?.toLocaleString()} intervals (${Math.round(info.trained_on_intervals/12)}h)`"></strong></div>
+                          </template>
+                          <template x-if="info.training_rows && !info.trained_on_intervals">
+                            <div><span>Training rows</span><strong x-text="info.training_rows?.toLocaleString()"></strong></div>
+                          </template>
+                          <template x-if="info.as_of">
+                            <div><span>As of</span><strong x-text="formatTime(info.as_of)"></strong></div>
+                          </template>
+                          <template x-if="info.metrics?.mae">
+                            <div><span>MAE</span><strong class="mono" x-text="`$${info.metrics.mae}/MWh`"></strong></div>
+                          </template>
+                          <template x-if="info.metrics?.rmse">
+                            <div><span>RMSE</span><strong class="mono" x-text="`$${info.metrics.rmse}/MWh`"></strong></div>
+                          </template>
+                          <template x-if="info.metrics?.final_loss">
+                            <div><span>Final loss</span><strong class="mono" x-text="info.metrics.final_loss"></strong></div>
+                          </template>
+                          <template x-if="info.horizon_intervals">
+                            <div><span>Horizon</span><strong x-text="`${info.horizon_intervals} intervals (${info.horizon_intervals * 5} min)`"></strong></div>
+                          </template>
+                          <template x-if="info.components?.length">
+                            <div><span>Components</span><strong x-text="info.components.join(', ')"></strong></div>
+                          </template>
+                        </div>
+                      </template>
+                      <template x-if="!info.available">
+                        <div>
+                          <div style="color:var(--text-muted);font-size:12px;margin-bottom:4px;" x-text="info.reason || 'Not trained yet.'"></div>
+                          <!-- LNN cold-start progress bar -->
+                          <template x-if="name==='lnn' && info.buffer_intervals != null">
+                            <div style="margin-top:6px;">
+                              <div style="font-size:11px;color:var(--text-muted);margin-bottom:3px;"
+                                   x-text="`Warming up: ${info.buffer_intervals}/288 intervals`"></div>
+                              <div style="height:4px;background:var(--border);border-radius:2px;overflow:hidden;">
+                                <div style="height:100%;background:var(--color-elevated);border-radius:2px;transition:width .4s;"
+                                     :style="`width:${Math.min(100,Math.round((info.buffer_intervals||0)/288*100))}%`"></div>
+                              </div>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
+                      <!-- Notes / caveats -->
+                      <template x-if="info.notes">
+                        <div style="font-size:11px;color:var(--text-muted);border-top:1px solid var(--border);padding-top:6px;margin-top:4px;"
+                             x-text="info.notes"></div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- Calibration scores table -->
+            <template x-if="modelStatus?.calibration?.scores?.length">
+              <div class="card" style="margin-top:12px;">
+                <div class="card__header">
+                  <span class="card__label">Walk-forward Calibration</span>
+                  <span style="font-size:11px;color:var(--text-muted);" x-text="`3-day lookback · ${modelStatus.calibration.n_origins} origins · ${modelStatus.calibration.horizon_min} min horizon`"></span>
+                </div>
+                <div class="card__body" style="padding:0;overflow-x:auto;">
+                  <table style="width:100%;border-collapse:collapse;font-size:11px;font-family:var(--font-mono);">
+                    <thead>
+                      <tr style="color:var(--text-muted);text-transform:uppercase;font-size:10px;">
+                        <th style="text-align:left;padding:6px 10px;border-bottom:1px solid var(--border);">Model</th>
+                        <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">CRPS</th>
+                        <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">Skill/Persist</th>
+                        <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">Skill/AEMO</th>
+                        <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">Spike Recall</th>
+                        <th style="text-align:right;padding:6px 8px;border-bottom:1px solid var(--border);">Cal Err</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="row in modelStatus.calibration.scores" :key="row.model">
+                        <tr style="border-bottom:1px solid var(--border-subtle);">
+                          <td style="padding:5px 10px;font-weight:600;color:var(--text-primary);" x-text="row.model.toUpperCase()"></td>
+                          <td class="mono" style="text-align:right;padding:5px 8px;" x-text="row.crps?.toFixed(2)"></td>
+                          <td class="mono" style="text-align:right;padding:5px 8px;"
+                              :style="row.skill_vs_persistence > 0 ? 'color:var(--verdict-supported)' : 'color:var(--verdict-insufficient)'"
+                              x-text="row.skill_vs_persistence != null ? (row.skill_vs_persistence * 100).toFixed(1) + '%' : '—'"></td>
+                          <td class="mono" style="text-align:right;padding:5px 8px;"
+                              :style="row.skill_vs_aemo_predispatch > 0 ? 'color:var(--verdict-supported)' : 'color:var(--verdict-insufficient)'"
+                              x-text="row.skill_vs_aemo_predispatch != null ? (row.skill_vs_aemo_predispatch * 100).toFixed(1) + '%' : '—'"></td>
+                          <td class="mono" style="text-align:right;padding:5px 8px;" x-text="row.spike_recall != null ? (row.spike_recall * 100).toFixed(1) + '%' : '—'"></td>
+                          <td class="mono" style="text-align:right;padding:5px 8px;" x-text="row.calibration_error?.toFixed(4)"></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                  <div style="padding:6px 10px;font-size:10px;color:var(--text-muted);">
+                    Positive skill = beats baseline. CRPS = continuous ranked probability score (lower = better). Cal Err = mean quantile coverage deviation.
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <template x-if="!modelStatus && !modelStatusLoading">
+              <div style="color:var(--text-muted);font-size:13px;">No model status — live forecast requires ≥288 persisted dispatch intervals.</div>
+            </template>
+
+            <div class="disclaimer" x-text="modelStatus?.caveat || 'Models are decision-support only. Metrics from walk-forward evaluation.'"></div>
+          </div>
+        </div>
+
+        <!-- ── Panel: Data Quality ───────────────────────────────── -->
+        <div class="vp-panel" :class="viewport.activeTab==='data' && !viewport.loading ? 'active' : ''">
+          <div id="vp-data">
+            <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);margin-bottom:16px;">
+              Data Quality — All Sources
+              <span x-show="dataStatusLoading" style="font-weight:400;margin-left:8px;">Loading…</span>
+            </div>
+
+            <template x-if="!dataStatus && !dataStatusLoading">
+              <div style="color:var(--text-muted);font-size:13px;">No data status available. Click the Data tab to load.</div>
+            </template>
+
+            <template x-if="dataStatus">
+              <div>
+
+                <!-- Market Events -->
+                <div class="why-section" style="margin-bottom:8px;">
+                  <div class="why-section__header">Market Events (Dispatch + Pre-dispatch)</div>
+                  <div class="why-section__body" style="padding:0;">
+                    <table class="cal-table" style="width:100%;">
+                      <thead>
+                        <tr>
+                          <th>Source</th><th>Region</th><th>Rows 2h</th><th>Rows 24h</th><th>Latest</th><th>Age (s)</th><th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="row in (dataStatus.sources || [])" :key="`${row.source}-${row.region}`">
+                          <tr>
+                            <td style="font-size:10px;" x-text="row.source || '—'"></td>
+                            <td x-text="row.region || '—'"></td>
+                            <td>
+                              <span x-text="row.rows_last_2h"></span>
+                              <template x-if="row.gap_flag">
+                                <span style="color:var(--status-warn);margin-left:3px;" title="Gap detected">⚠</span>
+                              </template>
+                            </td>
+                            <td x-text="row.rows_last_24h"></td>
+                            <td style="font-size:10px;" x-text="row.latest_valid_time ? row.latest_valid_time.slice(11,19) + 'Z' : '—'"></td>
+                            <td x-text="row.age_seconds != null ? row.age_seconds : '—'"></td>
+                            <td>
+                              <span class="feature-status"
+                                    :class="row.status==='fresh' ? 'feature-status--operational' : row.status==='stale' ? 'feature-status--warming' : 'feature-status--unavailable'"
+                                    x-text="row.status || 'unknown'"></span>
+                            </td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <!-- Supplementary tables -->
+                <div class="why-section" style="margin-bottom:8px;">
+                  <div class="why-section__header">Supplementary Tables</div>
+                  <div class="why-section__body">
+                    <template x-if="dataStatus.supplementary">
+                      <div>
+                        <!-- bid_offers -->
+                        <template x-if="dataStatus.supplementary.bid_offers">
+                          <div style="margin-bottom:6px;">
+                            <span style="font-size:11px;font-weight:700;color:var(--text-muted);">bid_offers — </span>
+                            <span x-text="`total ${dataStatus.supplementary.bid_offers.total ?? '—'}, last 24h ${dataStatus.supplementary.bid_offers.rows_last_24h ?? '—'}`" style="font-size:12px;"></span>
+                          </div>
+                        </template>
+                        <!-- unit_dispatch_events per region -->
+                        <div style="margin-bottom:4px;font-size:11px;font-weight:700;color:var(--text-muted);">unit_dispatch_events</div>
+                        <template x-if="dataStatus.supplementary.unit_dispatch_events && !dataStatus.supplementary.unit_dispatch_events.error">
+                          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                            <template x-for="[rgn, val] in Object.entries(dataStatus.supplementary.unit_dispatch_events)" :key="rgn">
+                              <div style="background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:4px;padding:4px 8px;font-size:11px;">
+                                <strong x-text="rgn"></strong>
+                                <span style="color:var(--text-muted);" x-text="`${val.rows_last_24h}r/24h`"></span>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
+                        <!-- market_driver_events top types -->
+                        <div style="margin-top:6px;margin-bottom:4px;font-size:11px;font-weight:700;color:var(--text-muted);">market_driver_events (top types)</div>
+                        <template x-if="dataStatus.supplementary.market_driver_events && !dataStatus.supplementary.market_driver_events.error">
+                          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                            <template x-for="[dtype, val] in Object.entries(dataStatus.supplementary.market_driver_events)" :key="dtype">
+                              <div style="background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:4px;padding:4px 8px;font-size:11px;">
+                                <strong x-text="dtype"></strong>
+                                <span style="color:var(--text-muted);" x-text="`${val.total}`"></span>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+
+                <!-- Backfill cursors -->
+                <template x-if="dataStatus.backfill_cursors?.length">
+                  <div class="why-section" style="margin-bottom:8px;">
+                    <div class="why-section__header">Backfill Cursors</div>
+                    <div class="why-section__body" style="padding:0;">
+                      <table class="cal-table" style="width:100%;">
+                        <thead>
+                          <tr><th>Name</th><th>Source</th><th>Status</th><th>Last Interval</th><th>Done</th><th>Failed</th></tr>
+                        </thead>
+                        <tbody>
+                          <template x-for="cur in dataStatus.backfill_cursors" :key="cur.name">
+                            <tr>
+                              <td style="font-size:10px;" x-text="cur.name"></td>
+                              <td style="font-size:10px;" x-text="cur.source"></td>
+                              <td>
+                                <span class="feature-status"
+                                      :class="cur.status==='complete' ? 'feature-status--operational' : cur.status==='running' ? 'feature-status--warming' : 'feature-status--unavailable'"
+                                      x-text="cur.status"></span>
+                              </td>
+                              <td style="font-size:10px;" x-text="cur.last_successful_interval ? cur.last_successful_interval.slice(0,16) : '—'"></td>
+                              <td x-text="cur.files_completed"></td>
+                              <td>
+                                <span :style="cur.files_failed ? 'color:var(--status-warn)' : ''" x-text="cur.files_failed"></span>
+                              </td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- In-process: HippoGraph + LNN trainers -->
+                <div class="why-section" style="margin-bottom:8px;">
+                  <div class="why-section__header">In-Process Engine State</div>
+                  <div class="why-section__body">
+                    <!-- HippoGraph -->
+                    <div style="margin-bottom:8px;">
+                      <span style="font-size:11px;font-weight:700;color:var(--text-muted);">HippoGraph nodes — </span>
+                      <template x-if="dataStatus.hippograph && !dataStatus.hippograph.error">
+                        <span>
+                          <template x-for="r in ['NSW1','VIC1','QLD1','SA1','TAS1']" :key="r">
+                            <span style="font-size:12px;margin-right:8px;">
+                              <strong x-text="r"></strong>:
+                              <span x-text="dataStatus.hippograph[r] ?? '—'"></span>
+                            </span>
+                          </template>
+                          <span style="font-size:12px;color:var(--text-muted);">total <strong x-text="dataStatus.hippograph.total ?? '—'"></strong></span>
+                        </span>
+                      </template>
+                      <template x-if="dataStatus.hippograph?.error">
+                        <span style="color:var(--text-muted);font-size:12px;" x-text="dataStatus.hippograph.error"></span>
+                      </template>
+                    </div>
+                    <!-- LNN trainers -->
+                    <div>
+                      <div style="font-size:11px;font-weight:700;color:var(--text-muted);margin-bottom:4px;">LNN Trainers</div>
+                      <template x-if="dataStatus.lnn_trainers && !dataStatus.lnn_trainers.error">
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                          <template x-for="[rgn, t] in Object.entries(dataStatus.lnn_trainers)" :key="rgn">
+                            <div style="background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:4px;padding:4px 8px;font-size:11px;">
+                              <strong x-text="rgn"></strong>
+                              <span class="feature-status"
+                                    :class="t.available ? 'feature-status--operational' : 'feature-status--warming'"
+                                    x-text="t.available ? `trained ${t.checkpoint_age_hours}h ago` : `${t.buffer_intervals ?? 0}/288 intervals`"
+                                    style="margin-left:4px;font-size:10px;"></span>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Scheduler job health -->
+                <template x-if="dataStatus.scheduler">
+                  <div class="why-section" style="margin-bottom:8px;">
+                    <div class="why-section__header">Scheduler Jobs</div>
+                    <div class="why-section__body" style="padding:0;">
+                      <table class="cal-table" style="width:100%;">
+                        <thead>
+                          <tr><th>Job</th><th>Last success</th><th>Failures</th><th>Last error</th></tr>
+                        </thead>
+                        <tbody>
+                          <template x-for="[job, s] in Object.entries(dataStatus.scheduler)" :key="job">
+                            <tr>
+                              <td style="font-size:11px;" x-text="job"></td>
+                              <td style="font-size:10px;" x-text="s.last_success_at ? s.last_success_at.slice(0,16) : 'never'"></td>
+                              <td>
+                                <span :style="s.consecutive_failures > 0 ? 'color:var(--status-warn)' : ''" x-text="s.consecutive_failures ?? 0"></span>
+                              </td>
+                              <td style="font-size:10px;color:var(--text-muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+                                  x-text="s.last_error || '—'"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- Cache ages -->
+                <template x-if="dataStatus.cache_age_seconds">
+                  <div class="why-section">
+                    <div class="why-section__header">Cache Ages</div>
+                    <div class="why-section__body">
+                      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                        <template x-for="[k, age] in Object.entries(dataStatus.cache_age_seconds)" :key="k">
+                          <div style="background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:4px;padding:3px 7px;font-size:11px;">
+                            <span style="color:var(--text-muted);" x-text="k"></span>
+                            <span style="margin-left:4px;"
+                                  :style="age == null ? 'color:var(--text-muted)' : age < 300 ? 'color:var(--tier-confirmed)' : age < 3600 ? 'color:var(--tier-plausible)' : 'color:var(--tier-unconfirmed)'"
+                                  x-text="age != null ? `${age}s` : 'empty'"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+
+                <div style="font-size:11px;color:var(--text-muted);margin-top:12px;" x-text="`As of ${dataStatus.timestamp?.slice(0,19)}Z`"></div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- ── Panel: Audit (Trace + Scenario + Analogs + About) ── -->
+        <div class="vp-panel" :class="viewport.activeTab==='audit' && !viewport.loading ? 'active' : ''">
+          <div id="vp-audit">
+
+            <!-- Trace Replay -->
+            <div class="why-section">
+              <div class="why-section__header">
+                Pipeline Trace
+                <span class="feature-status feature-status--operational"
+                      x-show="viewport.data?.verdict">Live query trace</span>
+              </div>
+              <div class="why-section__body">
+                <template x-if="viewport.data?.verdict">
+                  <div class="trace-lite">
+                    <div class="trace-lite__row"><span>Query ID</span><strong class="mono" x-text="viewport.data.query_id || '—'"></strong></div>
+                    <div class="trace-lite__row"><span>Trace ID</span><strong class="mono" x-text="viewport.data.verdict.trace_id || '—'"></strong></div>
+                    <div class="trace-lite__row"><span>Intent</span><strong x-text="viewport.data.intent || '—'"></strong></div>
+                    <div class="trace-lite__row"><span>Region</span><strong x-text="region"></strong></div>
+                    <div class="trace-lite__row"><span>Decomp confidence</span><strong x-text="confPct(viewport.data.decomposition?.confidence)"></strong></div>
+                    <div class="trace-lite__step">1. Input screened by SecurityObserver.</div>
+                    <div class="trace-lite__step">2. Query decomposed into intent, entities, and required evidence.</div>
+                    <div class="trace-lite__step">3. Parallel tools gathered dispatch, notices, analogs, forecast, TemporalRAG, weather, and fuel mix.</div>
+                    <div class="trace-lite__step">4. Deterministic WhyEngine built the verdict and counterargument. No LLM produces factual numbers.</div>
+                    <div class="trace-lite__step">5. Answer screened and stored with bitemporal trace metadata.</div>
+                  </div>
+                </template>
+                <template x-if="!viewport.data?.verdict">
+                  <div style="color:var(--text-muted);font-size:12px;">Submit a query to see the pipeline trace.</div>
+                </template>
+              </div>
+            </div>
+
+            <!-- Counterfactual / Scenario -->
+            <template x-if="viewport.data?.verdict">
+              <div class="why-section">
+                <div class="why-section__header">Scenario / What Could Break This</div>
+                <div class="why-section__body">
+                  <div style="margin-bottom:8px;" x-text="viewport.data.verdict.counterargument"></div>
+                  <template x-if="viewport.data.verdict.known_missing_before_action?.length">
+                    <div>
+                      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:4px;">Resolve before acting</div>
+                      <ul class="missing-list">
+                        <template x-for="m in viewport.data.verdict.known_missing_before_action" :key="m">
+                          <li x-text="m"></li>
+                        </template>
+                      </ul>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
+
+            <!-- HippoGraph Analog Scatter (full chart) -->
+            <div class="why-section">
+              <div class="why-section__header">
+                HippoGraph Analog Scatter
+                <span class="feature-status"
+                      :class="viewport.data?.analogs?.length >= 3 ? 'feature-status--operational' : viewport.data?.analogs?.length > 0 ? 'feature-status--warming' : 'feature-status--unavailable'"
+                      x-text="viewport.data?.analogs?.length ? `${viewport.data.analogs.length} matches` : 'No returned analogs'"></span>
+              </div>
+              <div class="why-section__body">
+                <template x-if="viewport.data?.analogs?.length">
+                  <div>
+                    <div id="analog-chart"></div>
+                    <div class="analog-table" style="margin-top:8px;">
+                      <div class="analog-table__head" style="grid-template-columns:repeat(9,1fr);">
+                        <span>Time</span><span>Regime</span><span>Price</span><span>ΔPrice</span><span>ΔDemand</span><span>ΔHeadroom</span><span>Sim</span><span>PPR</span><span>Outcome</span>
+                      </div>
+                      <template x-for="a in viewport.data.analogs" :key="a.node_id || `${a.valid_time}-${a.ppr_score}`">
+                        <div class="analog-table__row" style="grid-template-columns:repeat(9,1fr);"
+                             :title="a.match_reason || ''">
+                          <span x-text="formatDateTime(a.valid_time)"></span>
+                          <span>
+                            <span :class="`badge badge--regime-${(a.regime||'normal').toLowerCase()}`"
+                                  x-text="(a.regime||'normal').toUpperCase()"></span>
+                            <template x-if="a.regime_match">
+                              <span title="Regime matches current query" style="margin-left:2px;color:var(--color-supported);">✓</span>
+                            </template>
+                          </span>
+                          <span class="mono" x-text="`$${Number(a.price_rrp||0).toFixed(0)}`"></span>
+                          <span class="mono"
+                                :style="`color:${a.price_delta>0?'var(--color-elevated)':a.price_delta<0?'var(--color-supported)':'inherit'}`"
+                                x-text="a.price_delta != null ? `${a.price_delta>0?'+':''}${Number(a.price_delta).toFixed(0)}` : '—'"></span>
+                          <span class="mono" x-text="a.demand_delta != null ? `${a.demand_delta>0?'+':''}${Number(a.demand_delta).toFixed(0)}` : '—'"></span>
+                          <span class="mono" x-text="a.headroom_delta != null ? `${a.headroom_delta>0?'+':''}${Number(a.headroom_delta).toFixed(0)}` : '—'"></span>
+                          <span class="mono" x-text="a.cosine_similarity != null ? Number(a.cosine_similarity).toFixed(3) : '—'"></span>
+                          <span class="mono" x-text="Number(a.ppr_score||0).toFixed(4)"></span>
+                          <span :class="`badge ${a.outcome==='recovered'?'badge--supported':a.outcome==='continued_spike'?'badge--contradicted':'badge--low'}`"
+                                x-text="(a.outcome||'—').replace('_',' ')"></span>
+                        </div>
+                      </template>
+                    </div>
+                    <!-- Match reason tooltip area -->
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">
+                      Hover a row to see match reason. ΔPrice/ΔDemand/ΔHeadroom = query minus analog (MW or $/MWh). ✓ = same price regime as current query.
+                    </div>
+                  </div>
+                </template>
+                <template x-if="!viewport.data?.analogs?.length">
+                  <div style="color:var(--text-muted);font-size:12px;">No analogs returned. HippoGraph warms after ~24h of live dispatch data.</div>
+                </template>
+              </div>
+            </div>
+
+            <!-- About GridVerdict -->
+            <div class="why-section">
+              <div class="why-section__header">
+                About GridVerdict
+                <span class="feature-status feature-status--operational">Operational scope</span>
+              </div>
+              <div class="why-section__body">
+                GridVerdict is a NEM-focused evidence cockpit for dispatch-interval questions. It is designed to answer what changed, what evidence supports it, what is missing, and whether the current signal is strong enough to act on. It is research decision support, not trading automation.
+              </div>
+              <div class="why-section__body" style="padding-top:0;">
+                <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:6px;">Dispatch coverage by region</div>
+                <div class="coverage-chips">
+                  <template x-for="r in regions" :key="r">
+                    <span :class="coverageChipClass(r)"
+                          :title="`${r}: ${(coverage[r]||{}).days||0} days — ${(coverage[r]||{}).status||'unknown'}`"
+                          x-text="`${r} ${coverageLabel(r)}`"></span>
+                  </template>
+                </div>
+              </div>
+              <div class="why-section__body" style="padding-top:0;">
+                <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:6px;">Data sources</div>
+                <div class="coverage-chips" style="flex-direction:column;align-items:flex-start;gap:4px;">
+                  <template x-if="Object.keys(dataSources).length">
+                    <template x-for="key in Object.keys(dataSources)" :key="key">
+                      <div style="display:flex;align-items:center;gap:8px;">
+                        <span :class="sourceChipClass(key)" x-text="sourceLabel(key)" style="min-width:80px;justify-content:center;"></span>
+                        <span style="font-size:11px;color:var(--text-secondary);" x-text="key"></span>
+                        <span style="font-size:10px;color:var(--text-muted);" :title="(dataSources[key]||{}).caveat||''"
+                              x-text="((dataSources[key]||{}).caveat||'').slice(0,80)+(((dataSources[key]||{}).caveat||'').length>80?'…':'')"></span>
+                      </div>
+                    </template>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <!-- Platform comparison table -->
+            <div class="comparison-table-wrap">
+              <table class="comparison-table">
+                <thead>
+                  <tr>
+                    <th>Dimension</th>
+                    <th>GridVerdict</th>
+                    <th>NEM Review / WattClarity</th>
+                    <th>AEMO EMMS / NEMWeb</th>
+                    <th>OpenNEM</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Primary workflow</td>
+                    <td>Natural-language dispatch analysis</td>
+                    <td>Analyst dashboards and commentary</td>
+                    <td>Official market files and feeds</td>
+                    <td>Historical generation and market visualisation</td>
+                  </tr>
+                  <tr>
+                    <td>Freshness target</td>
+                    <td>5-minute NEM dispatch interval</td>
+                    <td>Dashboard-dependent</td>
+                    <td>Official source cadence</td>
+                    <td>Usually historical or delayed public views</td>
+                  </tr>
+                  <tr>
+                    <td>Evidence model</td>
+                    <td>Timestamped evidence refs and trace IDs per factual claim</td>
+                    <td>Visible source data, not per-claim refs</td>
+                    <td>Raw authoritative data</td>
+                    <td>Transparent public data views</td>
+                  </tr>
+                  <tr>
+                    <td>Analog retrieval</td>
+                    <td>HippoGraph PPR over stored market states</td>
+                    <td>Manual analyst comparison</td>
+                    <td>Not a query product</td>
+                    <td>Manual visual comparison</td>
+                  </tr>
+                  <tr>
+                    <td>Decision support</td>
+                    <td>Action recommendation with caveats and missing-data list</td>
+                    <td>Observation and analysis</td>
+                    <td>Source data only</td>
+                    <td>Observation and exploration</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="disclaimer">
+              GridVerdict does not claim benchmarked superiority over other platforms. Operational today: live dispatch evidence, deterministic routing, traces, and bounded explanations. In progress: full MMSDM backfill, constraint/interconnector attribution, and live LLM quality gates.
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Panel: Out of scope (edge case — shows in answer tab) -->
+        <div class="vp-panel" :class="viewport.activeTab==='out_of_scope' && !viewport.loading ? 'active' : ''">
+          <template x-if="viewport.data?.verdict">
+            <div id="vp-oos">
+              <div class="oos-icon">!</div>
+              <div style="max-width:680px;line-height:1.7;color:var(--text-secondary);" x-text="viewport.data.verdict.why_plain_english"></div>
+              <div class="disclaimer" x-text="viewport.data.verdict.disclaimer"></div>
+            </div>
+          </template>
+        </div>
+
+        <!-- ── Panel: Portfolio / BESS ───────────────────────────── -->
+        <div class="vp-panel" :class="viewport.activeTab==='portfolio' && !viewport.loading ? 'active' : ''">
+          <div id="vp-portfolio">
+
+            <div class="section-header">BESS Scenario Engine
+              <span class="badge badge--oos" style="font-size:10px;margin-left:8px;">SIMULATION ONLY</span>
+            </div>
+
+            <!-- Two-column layout: input left, result right -->
+            <div class="portfolio-layout">
+
+              <!-- ── Left: Input panels ────────────────────────────── -->
+              <div class="portfolio-inputs">
+
+                <!-- Asset Position -->
+                <div class="card">
+                  <div class="card__header">Asset Position</div>
+                  <div class="card__body portfolio-grid">
+                    <label class="portfolio-field">
+                      <span>Capacity (MWh)</span>
+                      <input class="input" type="number" min="1" step="1"
+                             x-model.number="portfolio.position.capacity_mwh" />
+                    </label>
+                    <label class="portfolio-field">
+                      <span>SOC (%)</span>
+                      <input class="input" type="number" min="0" max="100" step="1"
+                             x-model.number="portfolio.position.soc_pct" />
+                    </label>
+                    <label class="portfolio-field">
+                      <span>Max Discharge (MW)</span>
+                      <input class="input" type="number" min="0.1" step="1"
+                             x-model.number="portfolio.position.max_discharge_mw" />
+                    </label>
+                    <label class="portfolio-field">
+                      <span>Max Charge (MW)</span>
+                      <input class="input" type="number" min="0.1" step="1"
+                             x-model.number="portfolio.position.max_charge_mw" />
+                    </label>
+                    <label class="portfolio-field">
+                      <span>Round-Trip Efficiency (%)</span>
+                      <input class="input" type="number" min="1" max="100" step="0.5"
+                             x-model.number="portfolio.position.efficiency_pct" />
+                    </label>
+                    <label class="portfolio-field">
+                      <span>Degradation Cost ($/MWh)</span>
+                      <input class="input" type="number" min="0" step="0.5"
+                             x-model.number="portfolio.position.degradation_cost_per_mwh" />
+                    </label>
+                    <label class="portfolio-field">
+                      <span>Min Reserve SOC (%)</span>
+                      <input class="input" type="number" min="0" max="99" step="1"
+                             x-model.number="portfolio.position.min_reserve_soc_pct" />
+                    </label>
+                    <label class="portfolio-field">
+                      <span>Export Limit (MW)</span>
+                      <input class="input" type="number" min="0" step="1" placeholder="—"
+                             :value="portfolio.position.site_export_limit_mw ?? ''"
+                             @input="portfolio.position.site_export_limit_mw = $event.target.value ? +$event.target.value : null" />
+                    </label>
+                    <label class="portfolio-field" style="grid-column:1/-1;">
+                      <span>Contract Type</span>
+                      <select class="select" x-model="portfolio.position.contract_type">
+                        <option value="merchant">Merchant</option>
+                        <option value="ppa">PPA</option>
+                        <option value="contract_for_difference">CfD</option>
+                      </select>
+                    </label>
+                    <label class="portfolio-field portfolio-field--checkbox" style="grid-column:1/-1;">
+                      <input type="checkbox" x-model="portfolio.position.fcas_enabled" />
+                      <span>FCAS Enabled</span>
+                    </label>
+                  </div>
+                </div>
+
+                <!-- Market Context -->
+                <div class="card">
+                  <div class="card__header" style="display:flex;align-items:center;justify-content:space-between;">
+                    Market Context
+                    <button class="btn btn--ghost" style="font-size:11px;padding:2px 8px;"
+                            @click="prefillBessMarket()" title="Auto-fill from live market data">
+                      ↺ Prefill Live
+                    </button>
+                  </div>
+                  <div class="card__body portfolio-grid">
+                    <label class="portfolio-field">
+                      <span>Spot Price ($/MWh)</span>
+                      <input class="input" type="number" step="0.01"
+                             x-model.number="portfolio.market.price_rrp" />
+                    </label>
+                    <label class="portfolio-field">
+                      <span>Price Regime</span>
+                      <select class="select" x-model="portfolio.market.price_regime">
+                        <option value="normal">Normal</option>
+                        <option value="elevated">Elevated</option>
+                        <option value="spike">Spike</option>
+                        <option value="extreme">Extreme</option>
+                      </select>
+                    </label>
+                    <label class="portfolio-field">
+                      <span>Headroom (MW)</span>
+                      <input class="input" type="number" step="1" placeholder="—"
+                             :value="portfolio.market.headroom_mw ?? ''"
+                             @input="portfolio.market.headroom_mw = $event.target.value ? +$event.target.value : null" />
+                    </label>
+                    <label class="portfolio-field">
+                      <span>Forecast Direction</span>
+                      <select class="select"
+                              :value="portfolio.market.forecast_direction ?? ''"
+                              @change="portfolio.market.forecast_direction = $event.target.value || null">
+                        <option value="">Unknown</option>
+                        <option value="rising">Rising</option>
+                        <option value="falling">Falling</option>
+                        <option value="stable">Stable</option>
+                      </select>
+                    </label>
+                    <label class="portfolio-field">
+                      <span>FCAS Raise 6s ($/MWh)</span>
+                      <input class="input" type="number" step="0.01" placeholder="—"
+                             :value="portfolio.market.fcas_raise_6sec_rrp ?? ''"
+                             @input="portfolio.market.fcas_raise_6sec_rrp = $event.target.value ? +$event.target.value : null" />
+                    </label>
+                    <label class="portfolio-field">
+                      <span>FCAS Raise Reg ($/MWh)</span>
+                      <input class="input" type="number" step="0.01" placeholder="—"
+                             :value="portfolio.market.fcas_raise_reg_rrp ?? ''"
+                             @input="portfolio.market.fcas_raise_reg_rrp = $event.target.value ? +$event.target.value : null" />
+                    </label>
+                    <label class="portfolio-field" style="grid-column:1/-1;">
+                      <span>Evidence Quality</span>
+                      <select class="select" x-model="portfolio.market.evidence_quality">
+                        <option value="confirmed">Confirmed</option>
+                        <option value="supported">Supported</option>
+                        <option value="plausible">Plausible</option>
+                        <option value="insufficient">Insufficient</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+
+                <button class="btn btn--primary" style="width:100%;justify-content:center;font-size:14px;"
+                        @click="runBessScenario()"
+                        :disabled="portfolio.loading || !portfolio.market.price_rrp">
+                  <span x-show="portfolio.loading" class="spinner"></span>
+                  <span x-text="portfolio.loading ? 'Running scenario…' : 'Run Scenario'"></span>
+                </button>
+
+                <template x-if="portfolio.error">
+                  <div style="color:var(--verdict-insufficient);font-size:12px;margin-top:4px;" x-text="portfolio.error"></div>
+                </template>
+
+              </div><!-- /portfolio-inputs -->
+
+              <!-- ── Right: Result ─────────────────────────────────── -->
+              <div class="portfolio-result">
+                <template x-if="!portfolio.result">
+                  <div class="portfolio-empty">
+                    <div style="font-size:28px;opacity:0.2;margin-bottom:12px;">⚡</div>
+                    <div style="color:var(--text-muted);font-size:13px;">
+                      Enter your asset position and market context,<br>then run the scenario.
+                    </div>
+                  </div>
+                </template>
+
+                <template x-if="portfolio.result">
+                  <div style="display:flex;flex-direction:column;gap:12px;">
+
+                    <!-- Recommendation -->
+                    <div class="card">
+                      <div class="card__header">Recommendation</div>
+                      <div class="card__body" style="text-align:center;padding:20px 12px;">
+                        <div class="bess-action-label"
+                             :class="bessActionClass(portfolio.result.action)"
+                             x-text="bessActionLabel(portfolio.result.action)"></div>
+                        <div style="margin-top:8px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+                          <span class="badge"
+                                :class="portfolio.result.confidence === 'supported' ? 'badge--supported' : portfolio.result.confidence === 'low_confidence' ? 'badge--low' : 'badge--oos'"
+                                x-text="portfolio.result.confidence.replace(/_/g,' ').toUpperCase()"></span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Economics -->
+                    <div class="card">
+                      <div class="card__header">Economics (5-min interval)</div>
+                      <div class="card__body">
+                        <div class="econ-grid">
+                          <div class="econ-row">
+                            <span class="econ-label">Dispatch</span>
+                            <span class="econ-value mono" x-text="`${portfolio.result.economics.dispatch_mw.toFixed(1)} MW`"></span>
+                          </div>
+                          <div class="econ-row">
+                            <span class="econ-label">Energy dispatched</span>
+                            <span class="econ-value mono" x-text="`${portfolio.result.economics.energy_mwh.toFixed(3)} MWh`"></span>
+                          </div>
+                          <div class="econ-row">
+                            <span class="econ-label">Available energy</span>
+                            <span class="econ-value mono" x-text="`${portfolio.result.economics.available_energy_mwh.toFixed(1)} MWh (${portfolio.result.economics.usable_duration_minutes.toFixed(0)} min)`"></span>
+                          </div>
+                          <div class="econ-row econ-row--positive">
+                            <span class="econ-label">Expected revenue</span>
+                            <span class="econ-value mono" x-text="`+$${portfolio.result.economics.expected_revenue.toFixed(2)}`"></span>
+                          </div>
+                          <div class="econ-row econ-row--negative">
+                            <span class="econ-label">Degradation cost</span>
+                            <span class="econ-value mono" x-text="`−$${portfolio.result.economics.degradation_cost.toFixed(2)}`"></span>
+                          </div>
+                          <template x-if="portfolio.result.economics.fcas_opportunity_value > 0">
+                            <div class="econ-row econ-row--warning">
+                              <span class="econ-label">FCAS opp. cost</span>
+                              <span class="econ-value mono" x-text="`~$${portfolio.result.economics.fcas_opportunity_value.toFixed(2)} foregone`"></span>
+                            </div>
+                          </template>
+                          <div class="econ-row econ-row--total"
+                               :class="portfolio.result.economics.net_expected_value >= 0 ? 'econ-row--positive' : 'econ-row--negative'">
+                            <span class="econ-label" style="font-weight:600;">Net expected value</span>
+                            <span class="econ-value mono"
+                                  x-text="`${portfolio.result.economics.net_expected_value >= 0 ? '+' : ''}$${portfolio.result.economics.net_expected_value.toFixed(2)}`"></span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Why -->
+                    <div class="card">
+                      <div class="card__header">Rationale</div>
+                      <div class="card__body">
+                        <ul class="why-list">
+                          <template x-for="(item, i) in portfolio.result.why" :key="i">
+                            <li x-text="item"></li>
+                          </template>
+                        </ul>
+                      </div>
+                    </div>
+
+                    <!-- Risk flags -->
+                    <template x-if="portfolio.result.risk_flags.length > 0">
+                      <div class="card card--warn">
+                        <div class="card__header">Risk Flags</div>
+                        <div class="card__body">
+                          <ul class="why-list why-list--warn">
+                            <template x-for="(flag, i) in portfolio.result.risk_flags" :key="i">
+                              <li x-text="flag"></li>
+                            </template>
+                          </ul>
+                        </div>
+                      </div>
+                    </template>
+
+                    <!-- Missing Before Action -->
+                    <div class="card">
+                      <div class="card__header" style="color:var(--verdict-insufficient);">
+                        Missing Before Action
+                      </div>
+                      <div class="card__body">
+                        <ul class="why-list why-list--missing">
+                          <template x-for="(item, i) in portfolio.result.missing_before_action" :key="i">
+                            <li x-text="item"></li>
+                          </template>
+                        </ul>
+                      </div>
+                    </div>
+
+                    <!-- Caveat -->
+                    <div class="disclaimer" x-text="portfolio.result.caveat"></div>
+
+                  </div>
+                </template>
+              </div><!-- /portfolio-result -->
+
+            </div><!-- /portfolio-layout -->
+          </div><!-- /vp-portfolio -->
+        </div>
+
+        <!-- ── Panel: Incident Brief ──────────────────────────── -->
+        <div class="vp-panel" :class="viewport.activeTab==='brief' && !viewport.loading ? 'active' : ''">
+          <div id="vp-brief">
+
+            <div class="section-header" style="display:flex;align-items:center;gap:10px;">
+              Incident Brief
+              <span class="badge badge--oos" style="font-size:10px;">SIMULATION ONLY</span>
+              <button class="btn btn--ghost" style="font-size:11px;padding:2px 8px;margin-left:auto;"
+                      @click="refreshIncidentBrief()" :disabled="incidentBriefLoading">
+                <span x-show="incidentBriefLoading" class="spinner"></span>
+                <span x-text="incidentBriefLoading ? 'Loading…' : '↺ Refresh'"></span>
+              </button>
+            </div>
+
+            <!-- Error state -->
+            <template x-if="incidentBriefError">
+              <div class="alert alert--warning" style="margin:12px 0;">
+                <strong>Brief unavailable:</strong> <span x-text="incidentBriefError"></span>
+              </div>
+            </template>
+
+            <!-- Empty state -->
+            <template x-if="!incidentBrief && !incidentBriefLoading && !incidentBriefError">
+              <div style="color:var(--text-muted);font-size:13px;padding:24px 0;text-align:center;">
+                Click <strong>↺ Refresh</strong> or switch to this tab to load the current incident brief.
+              </div>
+            </template>
+
+            <template x-if="incidentBrief">
+              <div style="display:flex;flex-direction:column;gap:16px;">
+
+                <!-- Header row: trace + generated -->
+                <div style="display:flex;align-items:center;gap:16px;font-size:12px;color:var(--text-muted);">
+                  <span>Trace: <span class="mono" x-text="incidentBrief.trace_id"></span></span>
+                  <span>Region: <strong x-text="incidentBrief.region"></strong></span>
+                  <span>Generated: <span class="mono" x-text="new Date(incidentBrief.generated_at).toLocaleTimeString()"></span></span>
+                  <span>Elapsed: <span class="mono" x-text="incidentBrief.elapsed_ms + 'ms'"></span></span>
+                </div>
+
+                <!-- Source freshness strip -->
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                  <template x-if="incidentBrief.source_freshness?.dispatch">
+                    <span :class="{
+                            'badge': true,
+                            'badge--ok': incidentBrief.source_freshness.dispatch.status === 'fresh',
+                            'badge--warn': incidentBrief.source_freshness.dispatch.status === 'stale',
+                            'badge--oos': incidentBrief.source_freshness.dispatch.status === 'unavailable',
+                          }">
+                      Dispatch: <span x-text="incidentBrief.source_freshness.dispatch.status"></span>
+                      <template x-if="incidentBrief.source_freshness.dispatch.age_seconds !== null">
+                        <span x-text="' (' + incidentBrief.source_freshness.dispatch.age_seconds + 's)'"></span>
+                      </template>
+                    </span>
+                  </template>
+                  <template x-if="incidentBrief.source_freshness?.notices">
+                    <span :class="{
+                            'badge': true,
+                            'badge--ok': incidentBrief.source_freshness.notices.status === 'fresh',
+                            'badge--warn': incidentBrief.source_freshness.notices.status === 'stale',
+                            'badge--oos': incidentBrief.source_freshness.notices.status === 'unavailable',
+                          }">
+                      Notices: <span x-text="incidentBrief.source_freshness.notices.status"></span>
+                    </span>
+                  </template>
+                  <template x-if="incidentBrief.source_freshness?.forecast?.available">
+                    <span class="badge badge--ok">Forecast: available</span>
+                  </template>
+                  <template x-if="incidentBrief.source_freshness?.forecast && !incidentBrief.source_freshness.forecast.available">
+                    <span class="badge badge--oos">Forecast: unavailable</span>
+                  </template>
+                </div>
+
+                <!-- Two-column: market + BESS -->
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+
+                  <!-- Market state -->
+                  <div class="card">
+                    <div class="card__header">Market State</div>
+                    <div class="card__body" style="font-size:13px;">
+                      <template x-if="incidentBrief.market?.status === 'ok'">
+                        <div style="display:flex;flex-direction:column;gap:6px;">
+                          <div style="display:flex;justify-content:space-between;">
+                            <span style="color:var(--text-muted);">Price</span>
+                            <span class="mono" style="font-weight:700;"
+                                  :style="`color:${priceColor(incidentBrief.market.regime)}`"
+                                  x-text="`$${incidentBrief.market.price_rrp?.toFixed(2)}/MWh`"></span>
+                          </div>
+                          <div style="display:flex;justify-content:space-between;">
+                            <span style="color:var(--text-muted);">Demand</span>
+                            <span class="mono" x-text="`${incidentBrief.market.demand_mw?.toFixed(0)} MW`"></span>
+                          </div>
+                          <div style="display:flex;justify-content:space-between;">
+                            <span style="color:var(--text-muted);">Headroom</span>
+                            <span class="mono" x-text="`${incidentBrief.market.headroom_mw?.toFixed(0)} MW`"></span>
+                          </div>
+                          <div style="display:flex;justify-content:space-between;">
+                            <span style="color:var(--text-muted);">Regime</span>
+                            <span class="regime-badge" :class="regimeBadgeClass(incidentBrief.market.regime)"
+                                  x-text="(incidentBrief.market.regime || 'unknown').toUpperCase()"></span>
+                          </div>
+                          <div style="display:flex;justify-content:space-between;">
+                            <span style="color:var(--text-muted);">Age</span>
+                            <span class="mono" x-text="incidentBrief.market.age_seconds + 's'"></span>
+                          </div>
+                        </div>
+                      </template>
+                      <template x-if="incidentBrief.market?.status !== 'ok'">
+                        <span style="color:var(--text-muted);">No dispatch data</span>
+                      </template>
+                    </div>
+                  </div>
+
+                  <!-- BESS implication -->
+                  <div class="card">
+                    <div class="card__header" style="display:flex;align-items:center;gap:6px;">
+                      BESS Implication
+                      <span class="badge badge--oos" style="font-size:9px;">SIM ONLY</span>
+                    </div>
+                    <div class="card__body" style="font-size:13px;">
+                      <div style="display:flex;flex-direction:column;gap:6px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                          <span style="color:var(--text-muted);">Direction</span>
+                          <span :class="{
+                                  'bess-action--dispatch': incidentBrief.bess?.direction === 'dispatch',
+                                  'bess-action--charge': incidentBrief.bess?.direction === 'charge',
+                                  'bess-action--hold': incidentBrief.bess?.direction === 'standby',
+                                }"
+                                style="font-weight:700;font-size:13px;text-transform:uppercase;"
+                                x-text="incidentBrief.bess?.direction || 'unknown'"></span>
+                        </div>
+                        <div style="display:flex;justify-content:space-between;">
+                          <span style="color:var(--text-muted);">Confidence</span>
+                          <span x-text="incidentBrief.bess?.confidence || '—'"></span>
+                        </div>
+                        <div style="margin-top:4px;font-size:12px;color:var(--text-muted);line-height:1.4;"
+                             x-text="incidentBrief.bess?.reason"></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Driver evidence -->
+                <div class="card">
+                  <div class="card__header">Driver Evidence
+                    <span class="mono" style="font-size:11px;color:var(--text-muted);margin-left:8px;"
+                          x-text="`${incidentBrief.drivers?.confirmed_count ?? 0} confirmed, ${incidentBrief.drivers?.supported_count ?? 0} supported, ${incidentBrief.drivers?.plausible_count ?? 0} plausible`"></span>
+                  </div>
+                  <div class="card__body">
+                    <template x-if="incidentBrief.drivers?.events?.length > 0">
+                      <div style="display:flex;flex-direction:column;gap:4px;">
+                        <template x-for="ev in (incidentBrief.drivers?.events || []).slice(0,8)" :key="ev.id || ev.label">
+                          <div style="display:flex;align-items:center;gap:8px;font-size:12px;">
+                            <span :class="{
+                                    'badge': true,
+                                    'badge--ok': ev.tier === 'confirmed',
+                                    'badge--warn': ev.tier === 'supported',
+                                    'badge--oos': ev.tier === 'plausible',
+                                  }" style="font-size:10px;" x-text="ev.tier || 'plausible'"></span>
+                            <span x-text="ev.label || ev.type || 'event'"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                    <template x-if="!incidentBrief.drivers?.events?.length">
+                      <span style="font-size:12px;color:var(--text-muted);">No driver events found</span>
+                    </template>
+                  </div>
+                </div>
+
+                <!-- AEMO notices + historical analogs side by side -->
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+
+                  <div class="card">
+                    <div class="card__header">AEMO Notices
+                      <span class="mono" style="font-size:11px;color:var(--text-muted);margin-left:8px;"
+                            x-text="`${incidentBrief.notices?.count ?? 0} active`"></span>
+                    </div>
+                    <div class="card__body" style="font-size:12px;">
+                      <template x-if="incidentBrief.notices?.items?.length > 0">
+                        <ul style="margin:0;padding-left:14px;color:var(--text-muted);">
+                          <template x-for="n in (incidentBrief.notices?.items || []).slice(0,5)" :key="n.id || n.title">
+                            <li x-text="n.title || n.summary || JSON.stringify(n)"></li>
+                          </template>
+                        </ul>
+                      </template>
+                      <template x-if="!incidentBrief.notices?.items?.length">
+                        <span style="color:var(--text-muted);">No active notices</span>
+                      </template>
+                    </div>
+                  </div>
+
+                  <div class="card">
+                    <div class="card__header">Historical Analogs
+                      <span class="mono" style="font-size:11px;color:var(--text-muted);margin-left:8px;"
+                            x-text="`${incidentBrief.analogs?.count ?? 0} found`"></span>
+                    </div>
+                    <div class="card__body" style="font-size:12px;">
+                      <template x-if="incidentBrief.analogs?.items?.length > 0">
+                        <ul style="margin:0;padding-left:14px;color:var(--text-muted);">
+                          <template x-for="a in (incidentBrief.analogs?.items || []).slice(0,4)" :key="a.id || a.valid_time">
+                            <li>
+                              <span class="mono" x-text="a.valid_time ? new Date(a.valid_time).toLocaleDateString() : '—'"></span>
+                              <span x-show="a.price_rrp" x-text="` — $${a.price_rrp?.toFixed(0)}/MWh`"></span>
+                            </li>
+                          </template>
+                        </ul>
+                      </template>
+                      <template x-if="!incidentBrief.analogs?.items?.length">
+                        <span style="color:var(--text-muted);">HippoGraph index not populated</span>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Forecast state -->
+                <div class="card">
+                  <div class="card__header">Forecast State</div>
+                  <div class="card__body" style="font-size:12px;">
+                    <template x-if="incidentBrief.forecast?.available">
+                      <div style="display:flex;flex-wrap:wrap;gap:8px;">
+                        <template x-for="m in (incidentBrief.forecast?.models || [])" :key="m">
+                          <span class="badge badge--ok" x-text="m"></span>
+                        </template>
+                        <template x-if="!incidentBrief.forecast?.models?.length">
+                          <span style="color:var(--text-muted);">Available (no model list)</span>
+                        </template>
+                      </div>
+                    </template>
+                    <template x-if="!incidentBrief.forecast?.available">
+                      <span style="color:var(--text-muted);" x-text="incidentBrief.forecast?.note || 'Forecast unavailable'"></span>
+                    </template>
+                  </div>
+                </div>
+
+                <!-- Claim verification -->
+                <div class="card">
+                  <div class="card__header">Claim Verification
+                    <span :class="{
+                            'badge': true,
+                            'badge--ok': incidentBrief.verification?.overall === 'ok',
+                            'badge--warn': incidentBrief.verification?.overall !== 'ok',
+                          }" style="font-size:10px;margin-left:8px;"
+                          x-text="incidentBrief.verification?.overall"></span>
+                  </div>
+                  <div class="card__body" style="font-size:12px;">
+                    <template x-for="chk in (incidentBrief.verification?.checks || [])" :key="chk.claim">
+                      <div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px;">
+                        <span :class="{
+                                'badge': true,
+                                'badge--ok': chk.verdict === 'ok',
+                                'badge--warn': chk.verdict === 'anomaly',
+                                'badge--oos': chk.verdict === 'insufficient_data',
+                              }" style="font-size:10px;white-space:nowrap;" x-text="chk.verdict"></span>
+                        <span style="color:var(--text-muted);" x-text="chk.note"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+
+                <!-- Model provenance -->
+                <div class="card">
+                  <div class="card__header">Model Provenance</div>
+                  <div class="card__body" style="font-size:12px;">
+                    <template x-if="incidentBrief.provenance?.models?.length > 0">
+                      <table style="width:100%;border-collapse:collapse;">
+                        <thead>
+                          <tr style="color:var(--text-muted);text-align:left;font-size:11px;">
+                            <th style="padding:2px 8px 2px 0;">Model</th>
+                            <th style="padding:2px 8px 2px 0;">Version</th>
+                            <th style="padding:2px 8px 2px 0;">Registered</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <template x-for="m in incidentBrief.provenance.models" :key="m.name">
+                            <tr>
+                              <td class="mono" style="padding:2px 8px 2px 0;" x-text="m.name"></td>
+                              <td class="mono" style="padding:2px 8px 2px 0;" x-text="m.version || '—'"></td>
+                              <td class="mono" style="padding:2px 8px 2px 0;font-size:11px;"
+                                  x-text="m.registered_at ? new Date(m.registered_at).toLocaleDateString() : '—'"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </template>
+                    <template x-if="!incidentBrief.provenance?.models?.length">
+                      <span style="color:var(--text-muted);">Model registry not populated</span>
+                    </template>
+                  </div>
+                </div>
+
+              </div><!-- /brief content -->
+            </template>
+
+          </div><!-- /vp-brief -->
+        </div>
+
+        <!-- ── Panel: Live Feed (Sprint Q) ────────────────────────── -->
+        <div class="vp-panel" :class="viewport.activeTab==='livefeed' && !viewport.loading ? 'active' : ''">
+          <div id="vp-livefeed" style="height:100%;display:flex;flex-direction:column;">
+
+            <!-- Header + controls -->
+            <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0;">
+              <span style="font-weight:600;font-size:13px;">Live Market Feed</span>
+              <span class="badge badge--oos" style="font-size:10px;">AUTO-ANALYSIS</span>
+              <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+                <!-- Severity filter -->
+                <select class="select" x-model="commentary.minSeverity"
+                        @change="refreshCommentary()"
+                        style="font-size:11px;padding:2px 6px;height:24px;">
+                  <option value="LOW">All severity</option>
+                  <option value="MEDIUM">Medium+</option>
+                  <option value="HIGH">High+</option>
+                  <option value="CRITICAL">Critical only</option>
+                </select>
+                <!-- Pause / resume -->
+                <button class="btn btn--ghost"
+                        style="font-size:11px;padding:2px 8px;"
+                        @click="commentary.paused = !commentary.paused"
+                        :title="commentary.paused ? 'Resume live updates' : 'Pause live updates'">
+                  <span x-text="commentary.paused ? 'Resume' : 'Pause'"></span>
+                </button>
+                <button class="btn btn--ghost" style="font-size:11px;padding:2px 8px;"
+                        @click="refreshCommentary()">Refresh</button>
+              </div>
+            </div>
+
+            <!-- Loading state -->
+            <template x-if="commentary.loading">
+              <div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px;">
+                <span class="spinner"></span> Loading commentary events…
+              </div>
+            </template>
+
+            <!-- Empty state -->
+            <template x-if="!commentary.loading && commentary.events.length === 0">
+              <div style="padding:32px;text-align:center;color:var(--text-muted);font-size:13px;">
+                <div style="font-size:24px;margin-bottom:8px;">&#x2205;</div>
+                <div>No material market changes detected yet.</div>
+                <div style="font-size:11px;margin-top:4px;">Commentary fires when price, headroom, or notices change materially.</div>
+              </div>
+            </template>
+
+            <!-- Commentary cards -->
+            <div style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px;">
+              <template x-for="evt in commentary.events" :key="evt.id">
+                <div class="card" style="border-left:3px solid;"
+                     :style="`border-left-color:${severityColor(evt.severity)}`">
+
+                  <!-- Card header -->
+                  <div class="card__header" style="padding:8px 12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <span style="font-size:11px;color:var(--text-muted);"
+                          x-text="evt.valid_time ? evt.valid_time.replace('T',' ').substring(0,16) + ' UTC' : ''"></span>
+                    <span class="badge"
+                          :style="`background:${severityColor(evt.severity)}20;color:${severityColor(evt.severity)};border:1px solid ${severityColor(evt.severity)}40;font-size:10px;`"
+                          x-text="evt.severity"></span>
+                    <span style="font-size:10px;color:var(--text-muted);background:var(--bg-base);padding:1px 6px;border-radius:4px;border:1px solid var(--border);"
+                          x-text="(evt.event_type || '').replace(/_/g,' ')"></span>
+                    <span style="font-size:10px;color:var(--text-muted);margin-left:auto;" x-text="evt.region"></span>
+                    <button class="btn btn--ghost" style="font-size:10px;padding:1px 5px;line-height:1.2;"
+                            @click="dismissCommentaryEvent(evt.id)" title="Dismiss">&#x2715;</button>
+                  </div>
+
+                  <!-- Headline -->
+                  <div class="card__body" style="padding:8px 12px;">
+                    <div style="font-size:13px;font-weight:600;margin-bottom:8px;" x-text="evt.headline"></div>
+
+                    <!-- Claim Map — Sprint R (preferred; shown when present) -->
+                    <template x-if="evt.claim_map && evt.claim_map.length > 0">
+                      <div x-data="{ open: true }">
+                        <div @click="open = !open"
+                             style="font-size:11px;color:var(--text-muted);cursor:pointer;margin-bottom:4px;display:flex;align-items:center;gap:4px;">
+                          <span x-text="open ? '▼' : '▶'"></span>
+                          Evidence Map
+                          <span style="font-size:10px;background:var(--bg-elevated);border-radius:10px;padding:0 5px;margin-left:2px;"
+                                x-text="evt.claim_map.filter(f=>f.present).length + '/' + evt.claim_map.length"></span>
+                        </div>
+                        <template x-if="open">
+                          <div style="display:flex;flex-direction:column;gap:3px;">
+                            <template x-for="f in evt.claim_map.filter(f=>f.present)" :key="f.label">
+                              <div style="display:flex;align-items:flex-start;gap:6px;font-size:11px;padding:3px 4px;border-radius:3px;background:var(--bg-elevated);">
+                                <span :class="`driver-tier driver-tier--${f.tier}`"
+                                      style="font-size:9px;padding:1px 4px;white-space:nowrap;flex-shrink:0;">
+                                  <span class="driver-tier__dot"></span>
+                                  <span x-text="f.tier.toUpperCase().slice(0,4)"></span>
+                                </span>
+                                <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:rgba(148,163,184,.12);color:var(--text-muted);white-space:nowrap;flex-shrink:0;"
+                                      x-text="(f.claim_type||'').replace(/_/g,' ')"></span>
+                                <span x-text="f.label" style="flex:1;line-height:1.4;"></span>
+                                <template x-if="f.evidence_ref_ids && f.evidence_ref_ids.length">
+                                  <span style="font-size:9px;color:var(--text-muted);border:1px solid var(--border-subtle);border-radius:3px;padding:0 3px;white-space:nowrap;flex-shrink:0;"
+                                        :title="'refs: ' + f.evidence_ref_ids.join(', ')"
+                                        x-text="f.evidence_ref_ids.length + 'ref'"></span>
+                                </template>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+
+                    <!-- Contributing factors fallback (only when claim_map absent) -->
+                    <template x-if="(!evt.claim_map || evt.claim_map.length === 0) && evt.contributing_factors && evt.contributing_factors.length > 0">
+                      <div x-data="{ open: true }">
+                        <div @click="open = !open"
+                             style="font-size:11px;color:var(--text-muted);cursor:pointer;margin-bottom:4px;display:flex;align-items:center;gap:4px;">
+                          <span x-text="open ? '▼' : '▶'"></span>
+                          Contributing factors
+                        </div>
+                        <template x-if="open">
+                          <div style="display:flex;flex-direction:column;gap:2px;">
+                            <template x-for="f in evt.contributing_factors" :key="f.label">
+                              <div style="display:flex;align-items:flex-start;gap:6px;font-size:11px;">
+                                <span style="width:14px;flex-shrink:0;color:var(--text-muted);" x-text="tierIcon(f.tier)"></span>
+                                <span x-text="f.label" style="flex:1;"></span>
+                                <span style="font-size:10px;color:var(--text-muted);flex-shrink:0;"
+                                      x-text="'[' + f.tier + ']'"></span>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+
+                    <!-- Missing / unknown -->
+                    <template x-if="evt.missing_data && evt.missing_data.length > 0">
+                      <div style="margin-top:6px;font-size:11px;color:var(--text-muted);">
+                        Not explained: <span x-text="evt.missing_data.join(' · ')"></span>
+                      </div>
+                    </template>
+
+                    <!-- Corroborations -->
+                    <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap;">
+                      <template x-if="evt.corroborations">
+                        <div style="display:flex;gap:8px;font-size:10px;color:var(--text-muted);">
+                          <span :style="evt.corroborations.weather ? 'color:#16a34a' : ''"
+                                :title="evt.corroborations.weather ? 'Weather corroborates' : 'No weather signal'">
+                            &#x2600; Weather <span x-text="evt.corroborations.weather ? '✓' : '–'"></span>
+                          </span>
+                          <span :style="evt.corroborations.notices ? 'color:#16a34a' : ''"
+                                :title="evt.corroborations.notices ? 'AEMO notice present' : 'No AEMO notice'">
+                            &#x1F4CB; Notice <span x-text="evt.corroborations.notices ? '✓' : '–'"></span>
+                          </span>
+                        </div>
+                      </template>
+                      <!-- Confidence bar -->
+                      <div style="display:flex;align-items:center;gap:6px;font-size:10px;color:var(--text-muted);">
+                        <span>Confidence:</span>
+                        <div style="width:60px;height:5px;background:var(--border);border-radius:3px;overflow:hidden;">
+                          <div :style="`width:${(evt.confidence||0)*100}%;height:100%;background:${severityColor(evt.severity)};`"></div>
+                        </div>
+                        <span x-text="Math.round((evt.confidence||0)*100) + '%'"></span>
+                      </div>
+                    </div>
+
+                    <!-- Next watch — Sprint R: styled action badges -->
+                    <template x-if="evt.next_watch && evt.next_watch.length > 0">
+                      <div style="margin-top:8px;">
+                        <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;">Watch:</div>
+                        <div style="display:flex;flex-wrap:wrap;gap:4px;">
+                          <template x-for="(w, wIdx) in evt.next_watch" :key="wIdx">
+                            <span style="font-size:10px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.3);color:#fbbf24;border-radius:10px;padding:2px 9px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:default;"
+                                  :title="w" x-text="w"></span>
+                          </template>
+                        </div>
+                      </div>
+                    </template>
+
+                    <!-- Action buttons -->
+                    <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;">
+                      <button class="btn btn--ghost" style="font-size:11px;padding:3px 8px;"
+                              @click="askAboutCommentaryEvent(evt)">
+                        Ask about this &rarr;
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+
+          </div><!-- /vp-livefeed -->
+        </div>
+
+      </div><!-- /viewport-content -->
+    </div><!-- /viewport-pane -->
+  </div><!-- /app-shell -->
+
+  <!-- Toast container -->
+  <div id="toast-container">
+    <template x-for="t in toasts" :key="t.id">
+      <div class="toast" :class="`toast--${t.type}`" x-text="t.msg"></div>
+    </template>
+  </div>
+
+</div><!-- /root -->
+
+<!-- ECharts — vendored locally -->
+<script src="/static/vendor/echarts/echarts.min.js"></script>
+<!-- Main module — wires state, api, charts, keyboard shortcuts -->
+<script type="module" src="/static/js/main.js"></script>
+<script defer src="/static/vendor/alpine/cdn.min.js"></script>
+</body>
+</html>

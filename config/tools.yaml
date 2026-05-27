@@ -1,0 +1,95 @@
+# GridVerdict MCP tool registry
+# All tools are read-only by policy — GridVerdict never writes to external systems.
+# The security observer's pass_tool_output() screens every result before use.
+
+tools:
+
+  - name: aemo_dispatch_price
+    description: "Live 5-minute dispatch price from NEMWeb (public, no auth)"
+    category: dispatch
+    endpoint: "https://nemweb.com.au/Reports/Current/DispatchIS_Reports/"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 300
+    staleness_threshold_s: 600
+    enabled: true
+
+  - name: aemo_market_notices
+    description: "Active AEMO market notices: LOR, outages, RECLASSIFY, DIRECTIONS"
+    category: notices
+    endpoint: "https://nemweb.com.au/Reports/Current/Market_Notice/"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 60
+    staleness_threshold_s: 120
+    enabled: true
+
+  - name: aemo_archive
+    description: "NEMWeb archive for historical dispatch price backfill (MMSDM)"
+    category: archive
+    endpoint: "https://nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 3600
+    staleness_threshold_s: 7200
+    enabled: true
+
+  - name: hippograph_analogs
+    description: "In-process HippoGraph PPR: retrieve historical analog market states"
+    category: analogs
+    endpoint: "internal:hippograph"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 0
+    staleness_threshold_s: 300
+    enabled: true
+
+  - name: lnn_forecast
+    description: "LTC neural network quantile forecast P10/P50/P90 (in-process)"
+    category: forecast
+    endpoint: "internal:lnn_trainer"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 0
+    staleness_threshold_s: 300
+    enabled: true
+
+  - name: live_quantile_forecast
+    description: "Live LEAR/QRA/LNN quantile forecast bands trained from persisted dispatch history"
+    category: forecast
+    endpoint: "internal:live_forecast"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 300
+    staleness_threshold_s: 600
+    enabled: true
+
+  - name: aemo_predispatch
+    description: "AEMO pre-dispatch 30-min ahead RRP intervals (up to ~2 hours) from NEMWeb"
+    category: forecast
+    endpoint: "https://nemweb.com.au/Reports/Current/PredispatchIS_Reports/"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 300
+    staleness_threshold_s: 600
+    enabled: true
+
+  - name: nem_news_rss
+    description: "Public RSS/Atom energy market commentary filtered for NEM-relevant keywords"
+    category: sentiment
+    endpoint: "rss:configured"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 300
+    staleness_threshold_s: 600
+    enabled: true
+
+  - name: weather_consensus
+    description: "Read-only weather consensus from BOM observations, Open-Meteo, and MET Norway for NEM-relevant demand/renewables context"
+    category: weather
+    endpoint: "multi:open_meteo,met_no,bom_observations"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 300
+    staleness_threshold_s: 900
+    enabled: true
