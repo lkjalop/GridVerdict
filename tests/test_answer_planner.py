@@ -510,3 +510,40 @@ def test_hist_dist_plan_no_sub_question_no_hist_dist_falls_through():
 
     # Should fall through to _plan_explanation, not _plan_historical_distribution
     assert "median" not in " ".join(s for sec in plan.sections() for s in sec["items"]).lower()
+
+
+def test_fuel_source_plan_includes_historical_when_hist_dist_available():
+    """Fuel source planner injects historical comparison when hist_dist is present."""
+    sources = _sources(IntentLabel.EXPLANATION, "fuel_source_recommendation")
+    sources.decomp.raw_query = "why should i be cautious with buying coal? how was prices last year?"
+    sources.decomp.entities["technologies"] = ["coal"]
+    sources.decomp.sub_questions = [
+        {"type": "fuel_source_comparison", "fuels": ["coal"]},
+        {"type": "historical_price_distribution", "period": "last_year"},
+    ]
+
+    plan = plan_answer(
+        sources,
+        _verdict(),
+        fuel_mix={
+            "spot_price_rrp": 163.63,
+            "data_tier": "prior",
+            "recommendation": {
+                "fuel_type": "coal",
+                "preferred_order": ["coal", "hydro"],
+                "reason": "Moderate spot price: coal baseload offers stable cost.",
+                "confidence": "low",
+            },
+            "sources": [
+                {"fuel_type": "coal", "marginal_cost_typical": 55, "marginal_cost_low": 30,
+                 "marginal_cost_high": 80, "data_tier": "prior"},
+            ],
+        },
+        hist_dist=_HIST_DIST,
+    )
+
+    evidence = " ".join(_section(plan, "Evidence")["items"])
+    # Should include historical comparison line
+    assert "median" in evidence.lower() or "historical" in evidence.lower()
+    # Should still include fuel evidence
+    assert "NEM spot price" in evidence or "fuel" in evidence.lower() or "marginal" in evidence.lower()

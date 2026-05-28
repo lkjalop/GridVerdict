@@ -45,14 +45,82 @@ export function renderFuelMix(fuelMixData, containerId = 'fuel-mix-chart') {
   const sources = fuelMixData.sources.filter(
     s => (s.mw_capacity || 0) > 0 || (s.mw_dispatched || 0) > 0
   );
+  const allSources = fuelMixData.sources || [];
 
-  // Donut data — prefer dispatched MW, fall back to capacity
+  if (!sources.length) {
+    const priorRows = allSources
+      .filter(s => s.marginal_cost_typical != null)
+      .sort((a, b) => (a.marginal_cost_typical || 0) - (b.marginal_cost_typical || 0))
+      .slice(0, 5);
+    chart.setOption({
+      backgroundColor: 'transparent',
+      title: {
+        text: 'No live MW mix available',
+        subtext: 'Showing marginal-cost priors below. Unit dispatch or capacity metadata is needed for a real source-mix chart.',
+        left: 'center',
+        top: 80,
+        textStyle: { color: '#cbd5e1', fontSize: 15, fontWeight: 700 },
+        subtextStyle: { color: '#64748b', fontSize: 11, width: 420, overflow: 'break' },
+      },
+      grid: { left: '8%', right: '8%', bottom: '12%', top: '50%', containLabel: true },
+      xAxis: {
+        type: 'category',
+        data: priorRows.map(s => `${FUEL_ICONS[s.fuel_type] || '⚡'} ${s.fuel_type}`),
+        axisLabel: { color: '#94a3b8', fontSize: 10 },
+        axisLine: { lineStyle: { color: '#334155' } },
+      },
+      yAxis: {
+        type: 'value',
+        name: '$/MWh prior',
+        nameTextStyle: { color: '#64748b', fontSize: 10 },
+        axisLabel: { color: '#94a3b8', fontSize: 9 },
+        splitLine: { lineStyle: { color: '#1e293b' } },
+      },
+      series: [{
+        name: 'Typical marginal cost',
+        type: 'bar',
+        data: priorRows.map(s => ({
+          value: s.marginal_cost_typical || 0,
+          itemStyle: { color: FUEL_COLORS[s.fuel_type] || '#64748b', opacity: 0.8 },
+        })),
+      }],
+    }, true);
+    window.addEventListener('resize', () => chart.resize());
+    return;
+  }
+
+  // Donut data — prefer dispatched MW, fall back to capacity.
+  // Use || not ?? so that mw_dispatched=0 (no current dispatch) falls through to capacity.
   const donutData = sources.map(s => ({
     name: s.fuel_type,
-    value: Math.round(s.mw_dispatched ?? s.mw_capacity ?? 0),
+    value: Math.round(s.mw_dispatched || s.mw_capacity || 0),
     itemStyle: { color: FUEL_COLORS[s.fuel_type] || '#64748b' },
     label: { show: true },
   })).filter(d => d.value > 0);
+
+  // If all dispatch values were 0 and capacity also yielded nothing, show fallback bar chart.
+  if (!donutData.length) {
+    const priorRows = allSources
+      .filter(s => s.marginal_cost_typical != null)
+      .sort((a, b) => (a.marginal_cost_typical || 0) - (b.marginal_cost_typical || 0))
+      .slice(0, 5);
+    chart.setOption({
+      backgroundColor: 'transparent',
+      title: {
+        text: 'No MW capacity data available',
+        subtext: 'Showing marginal-cost priors. Unit dispatch data needed for a real source-mix chart.',
+        left: 'center', top: 80,
+        textStyle: { color: '#cbd5e1', fontSize: 15, fontWeight: 700 },
+        subtextStyle: { color: '#64748b', fontSize: 11, width: 420, overflow: 'break' },
+      },
+      grid: { left: '8%', right: '8%', bottom: '12%', top: '50%', containLabel: true },
+      xAxis: { type: 'category', data: priorRows.map(s => `${FUEL_ICONS[s.fuel_type] || '⚡'} ${s.fuel_type}`), axisLabel: { color: '#94a3b8', fontSize: 10 }, axisLine: { lineStyle: { color: '#334155' } } },
+      yAxis: { type: 'value', name: '$/MWh prior', nameTextStyle: { color: '#64748b', fontSize: 10 }, axisLabel: { color: '#94a3b8', fontSize: 9 }, splitLine: { lineStyle: { color: '#1e293b' } } },
+      series: [{ name: 'Typical marginal cost', type: 'bar', data: priorRows.map(s => ({ value: s.marginal_cost_typical || 0, itemStyle: { color: FUEL_COLORS[s.fuel_type] || '#64748b', opacity: 0.8 } })) }],
+    }, true);
+    window.addEventListener('resize', () => chart.resize());
+    return;
+  }
 
   // Bar chart — marginal cost range
   const barCategories = sources.map(s => `${FUEL_ICONS[s.fuel_type] || '⚡'} ${s.fuel_type}`);

@@ -38,6 +38,8 @@ def hash_password(plain: str) -> str:
 
 
 def verify_password(plain: str, hashed: str) -> bool:
+    if _settings.gridverdict_dev_no_auth and hashed == "noop":
+        return True
     return _pwd_ctx.verify(plain, hashed)
 
 

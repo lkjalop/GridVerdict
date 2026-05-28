@@ -143,8 +143,9 @@ async def submit_query(
     # Restore raw_query to original user text (not the seeded version).
     if _decompose_text != body.text:
         decomp = decomp.model_copy(update={"raw_query": body.text})
-    # Merge restatement sub_questions into decomp if the hybrid didn't populate them.
-    if not decomp.sub_questions and not restatement.is_empty():
+    # Always populate sub_questions from the deterministic classifier if the
+    # hybrid decomposer didn't already do it (e.g. Ollama down → rule-based only).
+    if not decomp.sub_questions:
         from app.engines.decomposition import _classify_sub_questions
         _sq = _classify_sub_questions(body.text.lower(), decomp.requested_output or "")
         if _sq:

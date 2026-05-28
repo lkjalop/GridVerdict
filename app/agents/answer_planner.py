@@ -67,7 +67,7 @@ def plan_answer(
     if requested == "price_fluctuation_attribution":
         return _plan_price_fluctuation(sources, factual, fuel_mix)
     if requested == "fuel_source_recommendation":
-        return _plan_fuel_source(sources, factual, fuel_mix)
+        return _plan_fuel_source(sources, factual, fuel_mix, hist_dist=hist_dist)
     if requested == "portfolio_action":
         return _plan_portfolio_or_action(sources, factual)
     # Historical distribution: route when sub_question present or requested directly.
@@ -325,6 +325,8 @@ def _plan_fuel_source(
     sources: WhySources,
     factual: FactualVerdict,
     fuel_mix: dict[str, Any] | None,
+    *,
+    hist_dist: dict[str, Any] | None = None,
 ) -> PlannedAnswer:
     c = sources.current
     requested = sources.decomp.entities.get("technologies") or []
@@ -361,10 +363,22 @@ def _plan_fuel_source(
     if not requested or "normally" in query or "normal" in query or "cheaper" in query:
         evidence.append(_normal_source_cost_line(mix))
     evidence.append(f"Fuel-mix evidence tier is {data_tier}; confidence is {rec.get('confidence', 'low')}.")
-    if "last year" in query or "previous year" in query:
+    # Historical comparison — inject when available (handles "how was prices last year?" sub-question)
+    if hist_dist and hist_dist.get("available"):
+        from app.engines.historical_price import classify_vs_history
+        _classification = classify_vs_history(c.price_rrp, hist_dist)
+        _median = hist_dist["median"]
+        _p90 = hist_dist["p90"]
+        _period = hist_dist.get("period_label", "historical")
         evidence.insert(
             1,
-            "Last-year price distribution is not yet part of this source answer; use archived market history for that comparison.",
+            f"vs {_period}: median ${_median:.2f}/MWh, P90 ${_p90:.2f}/MWh — "
+            f"current spot is {_classification.upper()} by historical standards.",
+        )
+    elif "last year" in query or "previous year" in query or "normally" in query:
+        evidence.insert(
+            1,
+            "Historical price distribution not available for this window (< 5 matching archive intervals).",
         )
     for note in (rec.get("notes") or [])[:2]:
         evidence.append(str(note))
@@ -391,7 +405,7 @@ def _plan_fuel_source(
         drivers=drivers,
         continuation=[],
         missing=[m for m in missing if m],
-        details=_details(sources, factual, fuel_mix=fuel_mix),
+        details=_details(sources, factual, fuel_mix=fuel_mix, hist_dist=hist_dist),
     )
 
 
