@@ -73,6 +73,7 @@ class QueryResponse(BaseModel):
     weather_consensus: dict | None = None
     temporal_evidence: list[dict] | None = None   # TemporalRAG top docs
     fuel_mix: dict | None = None                  # per-fuel-type breakdown
+    historical_dist: dict | None = None           # historical price distribution (percentiles)
     evidence_quality: dict | None = None          # per-query trust strip summary
     provenance: list[dict] | None = None          # per-source SourceStatus records
 
@@ -136,13 +137,18 @@ async def submit_query(
     # causal_targets and requested_output for multi-part queries.
     _decompose_text = restatement.seed_text(body.text)
 
-    # --- 1. Decompose (LLM: Ollama → Claude → rule-based) ---
+    # --- 1. Decompose (rules-first hybrid: rules → LLM enrichment → merge) ---
     _decomp_t0 = time.perf_counter()
     decomp = await llm_decompose(_decompose_text, region_hint=region, query_id=query_id)
-    # Restore raw_query to the original user text when we prepended a sub-questions prefix,
-    # so DB/trace stores what the user typed rather than the seeded decomposer input.
+    # Restore raw_query to original user text (not the seeded version).
     if _decompose_text != body.text:
         decomp = decomp.model_copy(update={"raw_query": body.text})
+    # Merge restatement sub_questions into decomp if the hybrid didn't populate them.
+    if not decomp.sub_questions and not restatement.is_empty():
+        from app.engines.decomposition import _classify_sub_questions
+        _sq = _classify_sub_questions(body.text.lower(), decomp.requested_output or "")
+        if _sq:
+            decomp = decomp.model_copy(update={"sub_questions": _sq})
     llm_decompose_latency_ms.observe((time.perf_counter() - _decomp_t0) * 1000)
 
     # --- 1b. Security pass 2 — decomposition intent check ---
@@ -280,6 +286,27 @@ async def submit_query(
     except Exception as exc:
         logger.debug("Fuel mix retrieval failed (non-fatal): %s", exc)
 
+    # --- 2d. Historical price distribution — for "is this cheap vs last year?" queries ---
+    hist_dist: dict | None = None
+    _has_hist_sq = any(
+        sq.get("type") == "historical_price_distribution"
+        for sq in (decomp.sub_questions or [])
+    )
+    if _has_hist_sq or decomp.requires_history:
+        try:
+            from app.engines.historical_price import get_historical_price_distribution
+            _anchor = gather.dispatch.valid_time if gather.dispatch else datetime.now(timezone.utc)
+            _hist_period = next(
+                (sq.get("period", "last_year") for sq in (decomp.sub_questions or [])
+                 if sq.get("type") == "historical_price_distribution"),
+                "last_year",
+            )
+            hist_dist = await get_historical_price_distribution(
+                db, region, _anchor, period=_hist_period,
+            )
+        except Exception as exc:
+            logger.debug("Historical price distribution unavailable (non-fatal): %s", exc)
+
     # --- 2e. Security pass 3 — tool output hygiene ---
     tool_outputs = []
     if gather.dispatch:
@@ -349,6 +376,7 @@ async def submit_query(
                 temporal_evidence=temporal_evidence,
                 provenance=provenance,
                 fuel_mix=fuel_mix,
+                hist_dist=hist_dist,
             ),
         )
     except Exception as exc:
@@ -394,6 +422,7 @@ async def submit_query(
                         temporal_evidence=temporal_evidence,
                         provenance=provenance,
                         fuel_mix=fuel_mix,
+                        hist_dist=hist_dist,
                     ),
                 )
                 decomp = _patched_decomp
@@ -499,6 +528,7 @@ async def submit_query(
         weather_consensus=gather.weather,
         temporal_evidence=temporal_evidence or None,
         fuel_mix=fuel_mix,
+        historical_dist=hist_dist,
         evidence_quality=evidence_quality,
         provenance=provenance,
     )

@@ -50,6 +50,7 @@ def plan_answer(
     temporal_evidence: list[dict[str, Any]] | None = None,
     provenance: list[dict[str, Any]] | None = None,
     fuel_mix: dict[str, Any] | None = None,
+    hist_dist: dict[str, Any] | None = None,
 ) -> PlannedAnswer:
     """Build concise visible answer sections from approved evidence."""
     requested = (sources.decomp.requested_output or "").lower()
@@ -69,6 +70,13 @@ def plan_answer(
         return _plan_fuel_source(sources, factual, fuel_mix)
     if requested == "portfolio_action":
         return _plan_portfolio_or_action(sources, factual)
+    # Historical distribution: route when sub_question present or requested directly.
+    _has_hist_sq = any(
+        sq.get("type") == "historical_price_distribution"
+        for sq in (sources.decomp.sub_questions or [])
+    )
+    if requested == "historical_price_distribution" or _has_hist_sq:
+        return _plan_historical_distribution(sources, factual, hist_dist or {})
     # requires_forecast is a data signal, not an intent override — keep this one.
     if requested == "causal_explanation_with_forecast" or sources.decomp.requires_forecast:
         return _plan_explanation(sources, factual, include_forecast=True)
@@ -326,6 +334,7 @@ def _plan_fuel_source(
     best = rec.get("fuel_type") or "unknown"
     spot = mix.get("spot_price_rrp", c.price_rrp)
     data_tier = mix.get("data_tier") or "unknown"
+    query = (sources.decomp.raw_query or "").lower()
 
     direct = []
     if "coal" in requested and best != "coal":
@@ -338,13 +347,25 @@ def _plan_fuel_source(
         )
     if preferred:
         direct.append("Preferred order: " + " > ".join(preferred) + ".")
-    if rec.get("reason"):
+    benchmark = ""
+    if "good price" in query or "normally" in query or "normal" in query:
+        benchmark = _source_price_benchmark_line(mix, requested[0] if requested else best, spot)
+        if benchmark:
+            direct.append(benchmark)
+    if rec.get("reason") and len(direct) < 3:
         direct.append(str(rec["reason"]))
 
     evidence = [
         f"NEM spot price is ${c.price_rrp:.2f}/MWh; all fuel types clear at the regional spot price.",
-        f"Fuel-mix evidence tier is {data_tier}; confidence is {rec.get('confidence', 'low')}.",
     ]
+    if not requested or "normally" in query or "normal" in query or "cheaper" in query:
+        evidence.append(_normal_source_cost_line(mix))
+    evidence.append(f"Fuel-mix evidence tier is {data_tier}; confidence is {rec.get('confidence', 'low')}.")
+    if "last year" in query or "previous year" in query:
+        evidence.insert(
+            1,
+            "Last-year price distribution is not yet part of this source answer; use archived market history for that comparison.",
+        )
     for note in (rec.get("notes") or [])[:2]:
         evidence.append(str(note))
     for fuel in requested[:3]:
@@ -356,6 +377,8 @@ def _plan_fuel_source(
         "This is a procurement/source suitability answer, not proof that one fuel caused the NSW spot price.",
         "At elevated prices, dispatchable flexibility and opportunity cost matter more than simple marginal-cost ranking.",
     ]
+    if rec.get("reason") and str(rec["reason"]) not in direct:
+        drivers.insert(0, str(rec["reason"]))
     missing = [
         "unit dispatch by fuel" if data_tier != "dispatch" else "",
         "bid/rebid stack by fuel",
@@ -385,6 +408,85 @@ def _plan_portfolio_or_action(sources: WhySources, factual: FactualVerdict) -> P
         continuation=_continuation_lines(sources),
         missing=_missing_lines(factual),
         details=_details(sources, factual),
+    )
+
+
+def _plan_historical_distribution(
+    sources: WhySources,
+    factual: FactualVerdict,
+    hist_dist: dict[str, Any],
+) -> PlannedAnswer:
+    from app.engines.historical_price import classify_vs_history
+    c = sources.current
+    available = hist_dist.get("available", False)
+
+    if not available:
+        return PlannedAnswer(
+            headline=f"{c.region} historical price distribution is unavailable.",
+            direct_answer=[
+                f"{c.region} is currently ${c.price_rrp:.2f}/MWh.",
+                "Not enough archived intervals match this hour/season window for a valid comparison.",
+            ],
+            key_evidence=["Archive requires at least 5 matching dispatch intervals."],
+            drivers=[],
+            continuation=[],
+            missing=["historical dispatch archive for this hour/season window"],
+            details=_details(sources, factual, hist_dist=hist_dist),
+        )
+
+    classification = classify_vs_history(c.price_rrp, hist_dist)
+    median = hist_dist["median"]
+    p25 = hist_dist["p25"]
+    p75 = hist_dist["p75"]
+    p90 = hist_dist["p90"]
+    period_label = hist_dist.get("period_label", "historical")
+    count = hist_dist.get("count", 0)
+    hour_window = hist_dist.get("hour_window", 2)
+
+    _headlines = {
+        "cheap":    f"{c.region} price is BELOW the historical median — unusually cheap for this time of day.",
+        "normal":   f"{c.region} price is near the historical median — within the normal range.",
+        "elevated": f"{c.region} price is above the median but still below the 75th percentile.",
+        "high":     f"{c.region} price is in the top 25% for this time window — historically high.",
+        "spike":    f"{c.region} price is above the 90th percentile — a spike by historical standards.",
+        "unknown":  f"{c.region} historical comparison is inconclusive.",
+    }
+    headline = _headlines.get(classification, f"{c.region} price vs history: {classification}.")
+
+    pct_vs_median = ((c.price_rrp - median) / median * 100) if median else 0.0
+    direction = "below" if pct_vs_median < 0 else "above"
+
+    direct = [
+        f"Current: ${c.price_rrp:.2f}/MWh.  Historical median (same hour ±{hour_window}h, same quarter, {period_label}): ${median:.2f}/MWh.",
+        f"That is {abs(pct_vs_median):.0f}% {direction} the median — classification: {classification.upper()}.",
+    ]
+    if classification == "elevated":
+        direct.append(f"Price sits between median (${median:.2f}) and P75 (${p75:.2f}/MWh).")
+    elif classification == "high":
+        direct.append(f"Price is above P75 (${p75:.2f}) and within P90 (${p90:.2f}/MWh) — top quarter for this window.")
+    elif classification == "spike":
+        direct.append(f"Price exceeds P90 (${p90:.2f}/MWh) — a spike relative to the {period_label} distribution.")
+    elif classification == "cheap":
+        direct.append(f"Price is below P25 (${p25:.2f}/MWh) — cheaper than 75% of comparable intervals.")
+
+    evidence = [
+        f"Distribution: P25 ${p25:.2f} | Median ${median:.2f} | P75 ${p75:.2f} | P90 ${p90:.2f} ($/MWh).",
+        f"Based on {count} archived dispatch intervals (±{hour_window}h window, same calendar quarter, {period_label}).",
+    ]
+
+    drivers = [
+        f"Historical benchmark classification: {classification.upper()}.",
+        "This is a distributional comparison only. Causal drivers need dispatch, bid/rebid, and constraint evidence.",
+    ]
+
+    return PlannedAnswer(
+        headline=headline,
+        direct_answer=direct,
+        key_evidence=evidence,
+        drivers=drivers,
+        continuation=[],
+        missing=_missing_lines(factual),
+        details=_details(sources, factual, hist_dist=hist_dist),
     )
 
 
@@ -425,7 +527,7 @@ def _trend_line(sources: WhySources) -> str:
 def _price_movement_line(sources: WhySources) -> str:
     rows = sorted(
         [r for r in sources.recent_dispatch if r.get("valid_time") and r.get("price_rrp") is not None],
-        key=lambda r: r["valid_time"],
+        key=lambda r: _sort_time(r["valid_time"]),
     )
     if not rows:
         return ""
@@ -439,6 +541,18 @@ def _price_movement_line(sources: WhySources) -> str:
     prices = [float(r["price_rrp"]) for r in rows[-6:]] + [current.price_rrp]
     swing = max(prices) - min(prices) if prices else 0.0
     return f"Recent movement: {' -> '.join(points)}; observed swing about ${swing:.0f}/MWh."
+
+
+def _sort_time(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+        except ValueError:
+            return datetime.min
+    return datetime.min
 
 
 def _nearest_row(rows: list[dict[str, Any]], anchor: datetime, minutes: int) -> dict[str, Any] | None:
@@ -600,6 +714,7 @@ def _details(
     temporal_evidence: list[dict[str, Any]] | None = None,
     provenance: list[dict[str, Any]] | None = None,
     fuel_mix: dict[str, Any] | None = None,
+    hist_dist: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "evidence_refs": [e.model_dump(mode="json") for e in factual.evidence_refs],
@@ -621,6 +736,7 @@ def _details(
         "evidence_quality": evidence_quality or {},
         "provenance": provenance or [],
         "fuel_mix": fuel_mix or {},
+        "hist_dist": hist_dist or {},
     }
 
 
@@ -639,6 +755,47 @@ def _fuel_compare_line(fuel_mix: dict[str, Any], fuel: str) -> str:
             )
         )
         return f"{fuel}: typical marginal-cost prior ${float(typical):.0f}/MWh, {mw_part}, data tier {tier}."
+    return ""
+
+
+def _normal_source_cost_line(fuel_mix: dict[str, Any]) -> str:
+    items = [
+        item for item in (fuel_mix.get("sources") or [])
+        if item.get("fuel_type") in {"solar", "wind", "coal", "hydro", "gas"}
+           and item.get("marginal_cost_typical") is not None
+    ]
+    if not items:
+        return "Normal source-cost ranking is unavailable because fuel priors are missing."
+    ranked = sorted(items, key=lambda item: float(item.get("marginal_cost_typical") or 0))
+    top = ", ".join(
+        f"{item['fuel_type']} ~${float(item['marginal_cost_typical']):.0f}/MWh"
+        for item in ranked[:4]
+    )
+    return f"Normal marginal-cost priors rank cheapest as: {top}."
+
+
+def _source_price_benchmark_line(fuel_mix: dict[str, Any], best: str, spot: Any) -> str:
+    for item in fuel_mix.get("sources") or []:
+        if item.get("fuel_type") != best:
+            continue
+        low = item.get("marginal_cost_low")
+        high = item.get("marginal_cost_high")
+        if low is None or high is None:
+            return ""
+        try:
+            spot_f = float(spot)
+        except (TypeError, ValueError):
+            return ""
+        if spot_f > float(high):
+            relation = "above"
+        elif spot_f < float(low):
+            relation = "below"
+        else:
+            relation = "inside"
+        return (
+            f"Good-price benchmark for {best}: prior band ${float(low):.0f}-${float(high):.0f}/MWh; "
+            f"current spot ${spot_f:.0f}/MWh is {relation} that band."
+        )
     return ""
 
 
