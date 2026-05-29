@@ -44,6 +44,7 @@ class ModelForecastDetail:
     p50: float | None = None
     p90: float | None = None
     caveat: str | None = None         # e.g. "checkpoint age 4d", "untrained"
+    spike_probs: dict | None = None   # {"gt_300": 0.12, "gt_1000": 0.03, "lt_0": 0.01}
 
 
 @dataclass
@@ -116,6 +117,19 @@ class TechnologyContext:
 
 
 @dataclass
+class FcasContext:
+    """FCAS market clearing prices and derived BESS opportunity signals."""
+    available: bool = False
+    max_raise_rrp: float | None = None
+    max_lower_rrp: float | None = None
+    best_raise_service: str | None = None
+    best_lower_service: str | None = None
+    total_opportunity_mwh: float | None = None
+    tight_markets: list[str] = field(default_factory=list)
+    raw: dict[str, Any] | None = None
+
+
+@dataclass
 class WhySources:
     decomp: QueryDecomposition
     current: CurrentDrivers
@@ -126,6 +140,7 @@ class WhySources:
     weather: WeatherContext = field(default_factory=WeatherContext)
     drivers: DriverContext = field(default_factory=DriverContext)
     technology: TechnologyContext = field(default_factory=TechnologyContext)
+    fcas: FcasContext = field(default_factory=FcasContext)
     source_coverage: float = 0.0   # fraction of scatter_gather tasks that returned data
 
 
@@ -284,6 +299,7 @@ def _build_model_detail_from_live_forecast(gather, classifier) -> list[ModelFore
             detail.append(ModelForecastDetail(
                 model=label, available=True, direction=direction,
                 p10=p10, p50=p50, p90=p90, caveat=fc.get("caveat"),
+                spike_probs=fc.get("spike_probs") or None,
             ))
         else:
             err = errors_by_model.get(model_key, "not in forecast output")
@@ -309,6 +325,7 @@ def _build_model_detail_from_live_forecast(gather, classifier) -> list[ModelFore
         detail.append(ModelForecastDetail(
             model=model_key, available=True, direction=direction,
             p10=p10, p50=p50, p90=p90, caveat=fc.get("caveat"),
+            spike_probs=fc.get("spike_probs") or None,
         ))
 
     return detail
@@ -319,9 +336,19 @@ def _lnn_caveat(gather) -> str:
     try:
         from app.engines.forecasting.inference import get_trainer
         trainer = get_trainer(gather.dispatch.region if gather.dispatch else "NSW1")
-        buf = getattr(trainer, "_buffer_count", None) or 0
-        if not trainer.is_trained:
-            return f"untrained ({buf}/288 intervals ingested)"
+        if trainer is None:
+            return "trainer unavailable"
+        if trainer.is_trained:
+            return ""   # trained — no caveat; forecast should be in live_forecast
+        buf = len(getattr(trainer, "_prices", []) or [])
+        required = int(getattr(trainer, "min_samples", 288) or 288)
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            return f"torch not installed ({buf}/{required} intervals buffered)"
+        if buf >= required:
+            return f"ready to train but no checkpoint ({buf}/{required} intervals buffered)"
+        return f"untrained ({buf}/{required} intervals buffered)"
     except Exception:
         pass
     return "unavailable"
@@ -471,8 +498,13 @@ def assemble_why_sources(
     from app.mcp.weather_client import weather_query_relevant
     weather_raw = gather.weather or {}
     weather_consensus = weather_raw.get("consensus", {}) if weather_raw else {}
+    _regime_for_weather = current.regime if dp else None
     weather = WeatherContext(
-        relevant=weather_query_relevant(decomp.raw_query),
+        relevant=weather_query_relevant(
+            decomp.raw_query,
+            region=region,
+            regime=_regime_for_weather,
+        ),
         available=bool(weather_raw and weather_consensus),
         consensus=weather_consensus,
         confidence=float(weather_raw.get("confidence") or 0.0) if weather_raw else 0.0,
@@ -517,6 +549,18 @@ def assemble_why_sources(
         has_unit_evidence=technology_summary["has_unit_evidence"],
     )
 
+    fcas_raw = gather.fcas or {}
+    fcas = FcasContext(
+        available=bool(fcas_raw.get("available")),
+        max_raise_rrp=fcas_raw.get("max_raise_rrp"),
+        max_lower_rrp=fcas_raw.get("max_lower_rrp"),
+        best_raise_service=fcas_raw.get("best_raise_service"),
+        best_lower_service=fcas_raw.get("best_lower_service"),
+        total_opportunity_mwh=fcas_raw.get("total_opportunity_mwh"),
+        tight_markets=list(fcas_raw.get("tight_markets") or []),
+        raw=fcas_raw or None,
+    )
+
     return WhySources(
         decomp=decomp,
         current=current,
@@ -527,5 +571,6 @@ def assemble_why_sources(
         weather=weather,
         drivers=drivers,
         technology=technology,
+        fcas=fcas,
         source_coverage=gather.source_coverage,
     )

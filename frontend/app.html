@@ -186,9 +186,19 @@
                       <span class="action-chip" :class="actionChipClass(msg.verdict.action)" x-text="msg.verdict.action?.replace('_',' ')"></span>
                       <span style="font-size:11px;color:var(--text-muted);" x-text="`${Math.round((msg.verdict.confidence||0)*100)}% conf`"></span>
                       <button class="btn btn--ghost" style="font-size:11px;padding:2px 8px;"
-                              @click="viewport.data = {verdict: msg.verdict}; viewport.type = 'answer'; viewport.activeTab = 'answer'">
+                              @click="viewport.data = msg.fullResp || {verdict: msg.verdict}; viewport.type = msg.viewportType ? _mapViewportType(msg.viewportType) : 'answer'; viewport.activeTab = 'answer'">
                         See answer →
                       </button>
+                    </div>
+                  </template>
+                  <!-- Follow-up suggestion chips (only on latest assistant message) -->
+                  <template x-if="msg.suggestedQuestions?.length && msg.id === messages.filter(m=>m.role==='assistant').slice(-1)[0]?.id">
+                    <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px;">
+                      <template x-for="q in msg.suggestedQuestions" :key="q">
+                        <button class="followup-chip"
+                                @click="queryInput = q; $nextTick(() => submitQuery())"
+                                x-text="q"></button>
+                      </template>
                     </div>
                   </template>
                 </div>
@@ -507,21 +517,48 @@
               </div>
 
               <!-- Analysis + Counterargument -->
-              <div class="card">
+              <div class="card" x-data="{ answerShowAll: false }">
                 <div class="card__header"><span class="card__label">Analysis</span></div>
                 <template x-if="viewport.data.verdict.answer_sections?.length">
                   <div class="card__body" style="display:grid;gap:10px;">
-                    <template x-for="section in viewport.data.verdict.answer_sections" :key="section.title">
+                    <!-- First section always visible -->
+                    <template x-if="viewport.data.verdict.answer_sections[0]">
                       <div style="border-left:3px solid var(--border-strong);padding-left:10px;">
                         <div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:4px;"
-                             x-text="section.title"></div>
-                        <template x-if="section.items?.length">
+                             x-text="viewport.data.verdict.answer_sections[0].title"></div>
+                        <template x-if="viewport.data.verdict.answer_sections[0].items?.length">
                           <ul style="margin:0;padding-left:16px;font-size:13px;line-height:1.55;">
-                            <template x-for="item in section.items" :key="item">
+                            <template x-for="item in viewport.data.verdict.answer_sections[0].items" :key="item">
                               <li x-text="item"></li>
                             </template>
                           </ul>
                         </template>
+                      </div>
+                    </template>
+                    <!-- Remaining sections behind "Show more" -->
+                    <template x-if="viewport.data.verdict.answer_sections.length > 1">
+                      <div>
+                        <div x-show="answerShowAll" style="display:grid;gap:10px;">
+                          <template x-for="(section, idx) in viewport.data.verdict.answer_sections" :key="section.title">
+                            <template x-if="idx > 0">
+                              <div style="border-left:3px solid var(--border-strong);padding-left:10px;">
+                                <div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:4px;"
+                                     x-text="section.title"></div>
+                                <template x-if="section.items?.length">
+                                  <ul style="margin:0;padding-left:16px;font-size:13px;line-height:1.55;">
+                                    <template x-for="item in section.items" :key="item">
+                                      <li x-text="item"></li>
+                                    </template>
+                                  </ul>
+                                </template>
+                              </div>
+                            </template>
+                          </template>
+                        </div>
+                        <button class="show-more-btn"
+                                @click="answerShowAll = !answerShowAll"
+                                x-text="answerShowAll ? '▲ Show less' : `▼ Show more (${viewport.data.verdict.answer_sections.length - 1} more section${viewport.data.verdict.answer_sections.length > 2 ? 's' : ''})`">
+                        </button>
                       </div>
                     </template>
                   </div>
@@ -531,6 +568,72 @@
                        x-text="viewport.data.verdict.why_plain_english"></div>
                 </template>
               </div>
+
+              <!-- Decision Path — two-column audit table -->
+              <template x-if="viewport.data?.pipeline_events?.length">
+                <div class="card" style="padding:0;">
+                  <div class="card__header" style="cursor:pointer;"
+                       @click="answerExpanded.decisionPath = !answerExpanded.decisionPath">
+                    <span class="card__label">Decision Path</span>
+                    <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">stage-by-stage audit — what each step found</span>
+                    <span class="collapsible-arrow" style="margin-left:auto;"
+                          :class="answerExpanded.decisionPath ? 'collapsible-arrow--open' : ''">›</span>
+                  </div>
+                  <div x-show="answerExpanded.decisionPath">
+                    <div class="dp-audit-table">
+
+                      <!-- Header row: query intent -->
+                      <div class="dp-audit-row dp-audit-row--header">
+                        <div class="dp-audit-label">
+                          <span class="dp-audit-stage">Intent</span>
+                        </div>
+                        <div class="dp-audit-detail">
+                          <span class="badge" style="font-size:10px;padding:2px 8px;vertical-align:middle;"
+                                :class="`intent-badge intent-${viewport.data.decomposition?.intent || 'unknown'}`"
+                                x-text="(viewport.data.decomposition?.intent || '—').replace(/_/g,' ')"></span>
+                          <template x-if="viewport.data.decomposition?.entities?.regions?.length">
+                            <span style="font-size:11px;color:var(--text-secondary);margin-left:6px;"
+                                  x-text="'· ' + viewport.data.decomposition.entities.regions.join(', ')"></span>
+                          </template>
+                          <template x-if="viewport.data.decomposition?.confidence">
+                            <span style="font-size:11px;color:var(--text-muted);margin-left:6px;"
+                                  x-text="`· ${Math.round((viewport.data.decomposition.confidence||0)*100)}% conf`"></span>
+                          </template>
+                          <template x-if="viewport.data.decomposition?.sub_questions?.length">
+                            <div style="margin-top:4px;display:flex;gap:3px;flex-wrap:wrap;align-items:center;">
+                              <span style="font-size:10px;color:var(--text-muted);">sub-questions:</span>
+                              <template x-for="sq in viewport.data.decomposition.sub_questions" :key="sq.type">
+                                <span class="dp-sq-chip" x-text="(sq.type||'').replace(/_/g,' ')"></span>
+                              </template>
+                            </div>
+                          </template>
+                          <template x-if="viewport.data.decomposition?.clarifying_question">
+                            <div style="margin-top:4px;font-size:11px;color:var(--verdict-low);font-style:italic;"
+                                 x-text="viewport.data.decomposition.clarifying_question"></div>
+                          </template>
+                        </div>
+                      </div>
+
+                      <!-- Pipeline rows -->
+                      <template x-for="(ev, idx) in viewport.data.pipeline_events" :key="ev.step + idx">
+                        <div class="dp-audit-row">
+                          <div class="dp-audit-label">
+                            <span class="dp-audit-dot" :style="`background:${_pipelineColor(ev.step)}`"></span>
+                            <div>
+                              <div class="dp-audit-stage"
+                                   :style="`color:${_pipelineColor(ev.step)}`"
+                                   x-text="_pipelineLabel(ev.step)"></div>
+                              <div class="dp-audit-timing" x-text="`+${ev.t_ms}ms`"></div>
+                            </div>
+                          </div>
+                          <div class="dp-audit-detail" x-html="_pipelineDetailHtml(ev, viewport.data)"></div>
+                        </div>
+                      </template>
+
+                    </div>
+                  </div>
+                </div>
+              </template>
 
               <!-- Causality Confidence Tier Table -->
               <template x-if="viewport.data.verdict.driver_tiers?.length">
@@ -702,6 +805,7 @@
                   <div class="card__header">
                     <span class="card__label">Source Recommendation</span>
                     <span style="font-size:11px;color:var(--text-muted);">Which fuel to buy now</span>
+                    <span style="margin-left:auto;font-size:10px;padding:1px 6px;background:rgba(245,158,11,.12);color:#f59e0b;border:1px solid rgba(245,158,11,.3);border-radius:3px;font-family:var(--font-mono);">Data: prior marginal-cost model — not live dispatch</span>
                   </div>
                   <div class="card__body">
                     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
@@ -1011,7 +1115,10 @@
             <!-- Best Buy recommendation -->
             <template x-if="fuelMix?.recommendation">
               <div class="verdict-hero" style="flex-direction:column;gap:12px;">
-                <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);">Best Buy Source Now</div>
+                <div style="display:flex;align-items:center;gap:10px;">
+                  <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);">Best Buy Source Now</div>
+                  <span style="font-size:10px;padding:1px 6px;background:rgba(245,158,11,.12);color:#f59e0b;border:1px solid rgba(245,158,11,.3);border-radius:3px;font-family:var(--font-mono);">Data: prior marginal-cost model — not live dispatch</span>
+                </div>
                 <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
                   <span style="font-size:22px;font-weight:800;"
                         x-text="fuelMix.recommendation.fuel_type?.toUpperCase()"></span>
@@ -1052,7 +1159,7 @@
                 <template x-if="fuelMix?.sources?.length">
                   <div style="margin-top:12px;padding:0 12px 12px;">
                     <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:6px;">Per Source Detail</div>
-                    <template x-for="s in (fuelMix.sources || []).filter(s => (s.mw_capacity||0)>0 || (s.mw_dispatched||0)>0)" :key="s.fuel_type">
+                    <template x-for="s in (fuelMix.sources || []).filter(s => (s.mw_capacity||0)>0 || (s.mw_dispatched||0)>0 || (s.unit_count||0)>0 || s.data_tier === 'prior')" :key="s.fuel_type">
                       <div class="ev-row" style="padding:6px 0;border-bottom:1px solid var(--border-subtle);">
                         <span style="font-weight:600;min-width:70px;" x-text="s.fuel_type.toUpperCase()"></span>
                         <template x-if="s.mw_dispatched !== null">

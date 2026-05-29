@@ -190,7 +190,7 @@ class LNNQuantileModel(ForecastModel):
     def load(self, path: str, n_features: int) -> "LNNQuantileModel":
         """Restore weights. n_features must match the training shape."""
         self._cell, self._head, self._spike_head = self._build(n_features)
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=True)
         self._cell.load_state_dict(ckpt["cell"])
         self._head.load_state_dict(ckpt["head"])
         if "spike_head" in ckpt:

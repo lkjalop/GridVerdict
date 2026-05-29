@@ -8,6 +8,7 @@ forecast bands.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -51,7 +52,8 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _MIN_TRAIN_INTERVALS = 288
-_DEFAULT_HORIZON_INTERVALS = 6
+_DEFAULT_HORIZON_INTERVALS = 48   # 4-hour ahead forecast (48 × 5 min)
+_TRAIN_HORIZON = 6                 # training alignment: 30-min-ahead targets (best-calibrated range)
 
 
 async def run_live_forecast(
@@ -118,10 +120,14 @@ def _run_sync(
     lookback_days: int,
     horizon_intervals: int,
     anchor: datetime,
-    series: list[dict[str, Any]],
+    series: list[dict[str, Any]] | None = None,
     weather_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     effective_lookback_days = lookback_days
+    if series is None:
+        maybe_series = _fetch_history(region, lookback_days, end_date=anchor)
+        series = asyncio.run(maybe_series) if inspect.isawaitable(maybe_series) else maybe_series
+
     if len(series) < _MIN_TRAIN_INTERVALS + horizon_intervals + 1:
         return _unavailable(
             region,
@@ -135,7 +141,9 @@ def _run_sync(
     if len(X_raw) < _MIN_TRAIN_INTERVALS + horizon_intervals + 1:
         return _unavailable(region, "feature matrix too short after joins", anchor)
 
-    h = horizon_intervals
+    # Training uses _TRAIN_HORIZON (30-min-ahead targets) regardless of forecast horizon.
+    # This preserves model calibration quality; uncertainty widening handles longer horizons.
+    h = min(horizon_intervals, _TRAIN_HORIZON)
     X_train = X_raw[:-h]
     y_train = y_raw[h:]
     if len(X_train) < _MIN_TRAIN_INTERVALS:
@@ -185,11 +193,45 @@ def _run_sync(
     train_start = target_times[0] if target_times else anchor
     train_ref_base = make_training_ref(region, train_start, anchor, fit_size)
 
+    # Derive current regime for regime-specific q_hat selection (E1)
+    _current_price = float(X_future[0, COL_LAST_PRICE]) if X_future.shape[0] > 0 else 0.0
+    try:
+        from domain.nem.adapter import classify_regime as _classify_regime
+        _current_regime = _classify_regime(_current_price, region)
+    except Exception:
+        _current_regime = "__global__"
+
+    # Fit regime-conditional conformal calibration once for all models (E1)
+    _regimes_cal: np.ndarray | None = None
+    if len(X_cal) >= _MIN_CONFORMAL_CAL_SIZE:
+        try:
+            from domain.nem.adapter import _REGIME_THRESHOLDS
+            _thresholds = _REGIME_THRESHOLDS.get(region, _REGIME_THRESHOLDS.get("NSW1", {}))
+            _ext = float(_thresholds.get("extreme", 1000))
+            _spk = float(_thresholds.get("spike", 300))
+            _elv = float(_thresholds.get("elevated", 100))
+            def _p_to_r(p: float) -> str:
+                if p >= _ext: return "extreme"
+                if p >= _spk: return "spike"
+                if p >= _elv: return "elevated"
+                return "normal"
+            _regimes_cal = np.array([_p_to_r(float(p)) for p in y_cal])
+        except Exception as exc:
+            logger.debug("Regime label derivation failed (non-fatal): %s", exc)
+
     forecasts: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     for name, model in models.items():
         try:
             model.fit(X_fit, y_fit)
+
+            # Regime-conditional conformal calibration for LEAR (E1)
+            if _regimes_cal is not None and hasattr(model, "fit_regime_conformal"):
+                try:
+                    model.fit_regime_conformal(X_cal, y_cal, _regimes_cal)
+                except Exception as exc:
+                    logger.debug("Regime conformal fit failed for %s/%s: %s", region, name, exc)
+
             register_model(name, "1.0.0", train_ref_base, {"cal_size": cal_size, "fit_size": fit_size})
             fc = model.predict_quantiles(X_future, future_times)
 
@@ -204,31 +246,50 @@ def _run_sync(
                     p90_cal = fc_cal.values[:, q_idx_cal[0.9]]
                     calibrator = ConformalCalibrator(coverage=0.9)
                     calibrator.fit(y_cal, p10_cal, p90_cal)
-                    q_hat = calibrator.q_hat
+                    # Use regime-specific q_hat when available (E1)
+                    if hasattr(model, "get_conformal_q_hat"):
+                        _regime_qhat = model.get_conformal_q_hat(_current_regime)
+                        q_hat = _regime_qhat if _regime_qhat > 0 else calibrator.q_hat
+                    else:
+                        q_hat = calibrator.q_hat
                     calibrated = True
                 except Exception as exc:
                     logger.debug("Conformal calibration failed for %s/%s: %s", region, name, exc)
 
             spike_probs: dict | None = None
+            spike_probs_series: dict | None = None
             if hasattr(model, "predict_spike_probs"):
                 try:
                     raw = model.predict_spike_probs(X_future)
+                    # First-interval scalars (for answer text / downstream logic)
                     spike_probs = {k: round(float(v[0]), 4) for k, v in raw.items()}
+                    # Full per-interval arrays (for chart overlay)
+                    spike_probs_series = {
+                        k: [round(float(p), 4) for p in v] for k, v in raw.items()
+                    }
                 except Exception as exc:
                     logger.debug("Spike prob prediction failed for %s/%s: %s", region, name, exc)
 
             forecasts.append(
                 _forecast_to_dict(name, fc, "trained on persisted dispatch history",
-                                  calibrated=calibrated, q_hat=q_hat, spike_probs=spike_probs)
+                                  calibrated=calibrated, q_hat=q_hat,
+                                  spike_probs=spike_probs, spike_probs_series=spike_probs_series)
             )
         except Exception as exc:
             errors.append({"model": name, "error": str(exc)})
 
-    lnn = _lnn_forecast(region, future_times[:1])
+    # Multi-step LNN rollout when available (replaces single-step _lnn_forecast)
+    lnn = _lnn_multistep_forecast(region, future_times)
+    if lnn is None:
+        lnn = _lnn_forecast(region, future_times[:1])
     if lnn:
         forecasts.append(lnn)
     else:
         errors.append({"model": "experimental_lnn", "error": "trained LNN weights/buffer unavailable"})
+
+    # Widen P10/P90 uncertainty bands beyond the 30-min training horizon
+    if horizon_intervals > _TRAIN_HORIZON:
+        forecasts = _apply_horizon_widening(forecasts, horizon_intervals, _TRAIN_HORIZON)
 
     if not forecasts:
         return _unavailable(region, "no forecast model produced output", anchor, errors)
@@ -245,9 +306,12 @@ def _run_sync(
         forecasts.append(meta_fc)
         register_model("meta_ensemble", "1.0.0", train_ref_base, {"regime": current_regime})
 
+    _model_names = {f["model"] for f in forecasts}
     primary = (
-        "meta_ensemble" if any(f["model"] == "meta_ensemble" for f in forecasts)
-        else "qra" if any(f["model"] == "qra" for f in forecasts)
+        "meta_ensemble" if "meta_ensemble" in _model_names
+        else "qra" if "qra" in _model_names
+        else "lnn_cfc" if "lnn_cfc" in _model_names
+        else "experimental_lnn" if "experimental_lnn" in _model_names
         else forecasts[0]["model"]
     )
     return {
@@ -304,11 +368,35 @@ def _future_feature_rows(
     horizon_intervals: int,
     weather_context: dict[str, Any] | None = None,
 ) -> np.ndarray:
+    """Build future feature rows advancing time-of-day and day-of-week per step.
+
+    TOD sin/cos is advanced by one 5-minute interval per row so that predictions
+    at hour 4 use 4am features, not repeated midnight features. DOW rolls over at
+    day boundaries. All other features hold their last-observed values — the model
+    does not invent future drivers.
+    """
+    from app.engines.forecasting.features.market_features import FEATURE_COLUMNS
+    COL_TOD_SIN = FEATURE_COLUMNS.index("tod_sin")
+    COL_TOD_COS = FEATURE_COLUMNS.index("tod_cos")
+    COL_DOW_IDX = FEATURE_COLUMNS.index("dow")
+
+    _INTERVAL_RAD = 2.0 * np.pi * 5.0 / (24.0 * 60.0)  # radians per 5-min interval
+
     rows = np.tile(last_row, (horizon_intervals, 1)).astype(float)
-    # For future rows the last observed price remains the latest known price.
-    # Time-of-day encodings are not advanced here — the live forecaster does not
-    # invent future drivers. Weather columns are set from current consensus when
-    # available; otherwise the tiled historical 0.0 default is kept.
+
+    # Reconstruct current TOD angle from sin/cos and advance per step
+    last_sin = float(last_row[COL_TOD_SIN])
+    last_cos = float(last_row[COL_TOD_COS])
+    current_angle = np.arctan2(last_sin, last_cos)
+    last_dow = float(last_row[COL_DOW_IDX])
+
+    for i in range(horizon_intervals):
+        step = i + 1
+        angle = current_angle + step * _INTERVAL_RAD
+        rows[i, COL_TOD_SIN] = np.sin(angle)
+        rows[i, COL_TOD_COS] = np.cos(angle)
+        rows[i, COL_DOW_IDX] = (last_dow + step // 288) % 7  # roll DOW every 288 intervals
+
     if weather_context:
         temp_c = weather_context.get("temp_c")
         wind_kmh = weather_context.get("wind_kmh")
@@ -317,6 +405,94 @@ def _future_feature_rows(
         if wind_kmh is not None:
             rows[:, COL_WIND_KMH] = float(wind_kmh)
     return rows
+
+
+def _apply_horizon_widening(
+    forecasts: list[dict[str, Any]],
+    horizon_intervals: int,
+    train_h: int,
+) -> list[dict[str, Any]]:
+    """Widen P10/P90 uncertainty bands for intervals beyond the training horizon.
+
+    Uses √(h / train_h) scaling — uncertainty grows with the square root of
+    relative horizon distance, analogous to Brownian motion. Applied only to
+    probabilistic ensemble/model outputs; baselines are left unchanged.
+    """
+    primary_names = {"meta_ensemble", "qra", "lear", "lnn_cfc", "experimental_lnn", "gbm"}
+    result = []
+    for fc in forecasts:
+        if fc.get("model") not in primary_names:
+            result.append(fc)
+            continue
+
+        p10_list = list(fc.get("p10") or [])
+        p50_list = list(fc.get("p50") or [])
+        p90_list = list(fc.get("p90") or [])
+        n = len(p50_list)
+        if n == 0:
+            result.append(fc)
+            continue
+
+        new_p10, new_p90 = [], []
+        base_half = (
+            abs(p90_list[0] - p10_list[0]) / 2.0
+            if p10_list and p90_list
+            else abs(p50_list[0]) * 0.15
+        )
+
+        for i in range(n):
+            h = i + 1
+            p50 = float(p50_list[i])
+            factor = np.sqrt(max(h, train_h) / train_h)
+            raw_half = (
+                abs(float(p90_list[i]) - float(p10_list[i])) / 2.0
+                if i < len(p10_list) and i < len(p90_list)
+                else base_half
+            )
+            widened_half = raw_half * factor
+            new_p10.append(round(p50 - widened_half, 2))
+            new_p90.append(round(p50 + widened_half, 2))
+
+        fc_out = dict(fc)
+        fc_out["p10"] = new_p10
+        fc_out["p90"] = new_p90
+        fc_out["horizon_widened"] = True
+        existing_caveat = fc.get("caveat") or "trained on persisted dispatch history"
+        fc_out["caveat"] = (
+            existing_caveat
+            + f" Uncertainty bands widen beyond {train_h * 5}-min training horizon (√h scaling)."
+        )
+        result.append(fc_out)
+
+    return result
+
+
+def _lnn_multistep_forecast(
+    region: str, target_times: list[datetime]
+) -> dict[str, Any] | None:
+    """Multi-step LTC autoregressive rollout for the full forecast horizon."""
+    try:
+        from app.engines.forecasting.inference import get_trainer
+        trainer = get_trainer(region)
+        if trainer is None or not trainer.is_trained:
+            return None
+        steps = len(target_times)
+        results = trainer.predict_multistep_from_buffer(steps)
+        if not results:
+            return None
+        register_model("experimental_lnn", "1.0.0", f"{region}:live-ltc-multistep", {"source": "ltc_trainer", "steps": steps})
+        return {
+            "model": "experimental_lnn",
+            "target_times": [t.isoformat() for t in target_times],
+            "p10": [round(float(r["p10"]), 2) for r in results],
+            "p50": [round(float(r["p50"]), 2) for r in results],
+            "p90": [round(float(r["p90"]), 2) for r in results],
+            "quantiles": [0.1, 0.5, 0.9],
+            "caveat": f"LNN multi-step autoregressive rollout ({steps} intervals); uncertainty accumulates with horizon.",
+        }
+    except Exception as exc:
+        logger.debug("LNN multi-step forecast unavailable for %s: %s", region, exc)
+        return None
 
 
 def _lnn_forecast(region: str, target_times: list[datetime]) -> dict[str, Any] | None:
@@ -349,6 +525,7 @@ def _forecast_to_dict(
     calibrated: bool = False,
     q_hat: float = 0.0,
     spike_probs: dict | None = None,
+    spike_probs_series: dict | None = None,
 ) -> dict[str, Any]:
     q_idx = {float(q): i for i, q in enumerate(fc.quantiles)}
     p10_raw = fc.values[:, q_idx[0.1]]
@@ -376,6 +553,8 @@ def _forecast_to_dict(
         d["conformal_coverage"] = 0.9
     if spike_probs is not None:
         d["spike_probs"] = spike_probs
+    if spike_probs_series is not None:
+        d["spike_probs_series"] = spike_probs_series
     return d
 
 

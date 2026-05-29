@@ -70,7 +70,7 @@ async def get_constraints(
             return await _query_timeline(session, region, hours, driver_type, element_id.strip())
     except Exception as exc:
         logger.warning("Constraint timeline query failed: %s", exc)
-        return _empty_response(region, hours, str(exc))
+        return _empty_response(region, hours, "query_failed")
 
 
 @router.get("/constraints/elements")
@@ -251,6 +251,10 @@ def _summarise_timeline(events: list[dict]) -> list[dict]:
 
 
 def _empty_response(region: str, hours: int, reason: str) -> dict[str, Any]:
+    reason_text = {
+        "query_failed": "constraint query failed",
+        "no_data": "no data in this window",
+    }.get(reason, reason)
     return {
         "region": region,
         "hours": hours,
@@ -261,6 +265,6 @@ def _empty_response(region: str, hours: int, reason: str) -> dict[str, Any]:
         "note": (
             "No constraint or interconnector data found for this window. "
             "Archive backfill populates DISPATCHCONSTRAINT and DISPATCHINTERCONNECTORRES. "
-            f"(reason: {reason})"
+            f"(reason: {reason_text})"
         ),
     }

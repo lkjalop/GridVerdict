@@ -17,7 +17,13 @@ async def retrieve_unit_dispatch(
     window_minutes: int = 5,
     limit: int = 500,
 ) -> list[dict[str, Any]]:
-    """Return unit dispatch rows around an interval for a region."""
+    """Return unit dispatch rows around an interval.
+
+    Primary: DISPATCH_UNIT_SOLUTION rows from UnitDispatchEvent (participant-only,
+    requires data pipeline feeding that table).
+    Fallback: merit-order reconstruction from BidOffer + GeneratorUnit when no
+    UnitDispatchEvent rows are present.
+    """
     from sqlalchemy import select
     from app.db.models import UnitDispatchEvent
 
@@ -31,7 +37,127 @@ async def retrieve_unit_dispatch(
         .order_by(UnitDispatchEvent.valid_time.desc(), UnitDispatchEvent.total_cleared_mw.desc().nullslast())
         .limit(limit)
     )
-    return [_row_to_dict(row) for row in result.scalars().all()]
+    rows = [_row_to_dict(row) for row in result.scalars().all()]
+    if rows:
+        return rows
+
+    # Fallback: reconstruct approximate dispatch from bid data + generator registry
+    return await _reconstruct_from_bids(session, region, valid_time, limit)
+
+
+async def _reconstruct_from_bids(
+    session,
+    region: str,
+    valid_time: datetime,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Approximate unit dispatch via merit-order from BidOffer + GeneratorUnit.
+
+    Uses the latest ENERGY bid for each DUID in the region (BIDDAYOFFER or most
+    recent BIDPEROFFER), maps to fuel_type via GeneratorUnit, then runs a simple
+    economic dispatch simulation to meet observed demand.
+
+    Data tier: "bid_reconstruction" — better than static priors, not as accurate
+    as DISPATCH_UNIT_SOLUTION. Demand value comes from caller context (not available
+    here), so we use total offered capacity as a proxy and dispatch all offered units.
+    """
+    try:
+        from sqlalchemy import select, and_
+        from app.db.models import BidOffer, GeneratorUnit
+
+        # Get generator registry for the region
+        gen_result = await session.execute(
+            select(GeneratorUnit).where(GeneratorUnit.region == region.upper())
+        )
+        generators: dict[str, "GeneratorUnit"] = {g.duid: g for g in gen_result.scalars().all()}
+        if not generators:
+            return []
+
+        # Get the most recent ENERGY bids per DUID on or before valid_time
+        day_start = valid_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        bid_result = await session.execute(
+            select(BidOffer)
+            .where(
+                and_(
+                    BidOffer.region == region.upper(),
+                    BidOffer.bid_type == "ENERGY",
+                    BidOffer.settlement_date >= day_start,
+                    BidOffer.settlement_date <= valid_time,
+                )
+            )
+            .order_by(BidOffer.settlement_date.desc(), BidOffer.offer_date.desc())
+            .limit(limit * 2)
+        )
+        bids = bid_result.scalars().all()
+        if not bids:
+            return []
+
+        # Keep latest bid per DUID
+        seen: set[str] = set()
+        best_bids: list = []
+        for b in bids:
+            if b.duid not in seen:
+                seen.add(b.duid)
+                best_bids.append(b)
+
+        # Build units with cheapest price band and max offered capacity
+        units = []
+        for bid in best_bids:
+            gen = generators.get(bid.duid)
+            if gen is None:
+                continue
+            price_bands = bid.price_bands or {}
+            avail_bands = bid.avail_bands or {}
+            if not price_bands:
+                continue
+            # Find cheapest non-market-cap price
+            _MARKET_PRICE_CAP = 15500.0
+            min_price = min(
+                (float(v) for v in price_bands.values() if float(v) < _MARKET_PRICE_CAP),
+                default=_MARKET_PRICE_CAP,
+            )
+            total_avail = sum(float(v) for v in avail_bands.values())
+            max_cap = float(gen.max_capacity_mw or total_avail or 0.0)
+            offered_mw = min(total_avail, max_cap)
+            if offered_mw <= 0:
+                continue
+            units.append({
+                "duid": bid.duid,
+                "station_name": gen.station_name,
+                "fuel_type": (gen.fuel_type or "unknown").lower(),
+                "region": region,
+                "valid_time": valid_time,
+                "min_price_band": min_price,
+                "max_avail_mw": offered_mw,
+            })
+
+        # Sort by merit order (cheapest first)
+        units.sort(key=lambda u: u["min_price_band"])
+
+        # Dispatch all offered units (we don't have demand here; caller's summarise handles it)
+        dispatched = []
+        for unit in units[:limit]:
+            dispatched.append({
+                "source": "BID_RECONSTRUCTION",
+                "duid": unit["duid"],
+                "station_name": unit["station_name"],
+                "participant": None,
+                "region": region,
+                "fuel_type": unit["fuel_type"],
+                "valid_time": unit["valid_time"],
+                "initial_mw": unit["max_avail_mw"],
+                "total_cleared_mw": unit["max_avail_mw"],
+                "availability_mw": unit["max_avail_mw"],
+                "target_mw": unit["max_avail_mw"],
+                "ramp_rate": None,
+                "semi_dispatch_cap": None,
+                "data": {"min_price_band": unit["min_price_band"], "reconstruction": True},
+                "raw_ref": "bid_reconstruction",
+            })
+        return dispatched
+
+    except Exception:
+        return []
 
 
 def summarise_unit_dispatch(unit_events: list[dict[str, Any]]) -> dict[str, Any]:

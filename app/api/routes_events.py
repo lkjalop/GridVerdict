@@ -53,6 +53,8 @@ _ALL_EVENT_TYPES = frozenset({
     "trace_written",
     "incident_timeline_updated",
     "commentary_created",   # Sprint Q: rolling market commentary
+    "spike_alert",          # Proactive spike detection — frontend injects into chat
+    "spike_resolved",       # Price normalised after spike
 })
 
 

@@ -57,6 +57,8 @@ class DispatchPrice:
     demand_mw: float
     availability_mw: float
     raw_ref: str                  # sha256 of zip content
+    fcas_prices: dict | None = None  # {raise6sec, lower6sec, raise60sec, lower60sec,
+                                     #  raise5min, lower5min, raisereg, lowerreg} all $/MWh
 
 
 @dataclass
@@ -85,13 +87,16 @@ class LiveMarketSnapshot:
 
 
 def _dp_to_dict(dp: DispatchPrice) -> dict[str, Any]:
-    return {
+    d: dict[str, Any] = {
         "region": dp.region,
         "valid_time": dp.valid_time.isoformat(),
         "price_rrp": dp.price_rrp,
         "demand_mw": dp.demand_mw,
         "availability_mw": dp.availability_mw,
     }
+    if dp.fcas_prices:
+        d["fcas_prices"] = dp.fcas_prices
+    return d
 
 
 class AEMOLiveClient:
@@ -199,7 +204,12 @@ def _parse_dispatch_zip(content: bytes, raw_ref: str) -> dict[str, DispatchPrice
 
     # Per-table column mappings (detected from I header rows)
     _price_cols: dict[str, int | None] = {
-        "date": None, "region": None, "rrp": None, "demand": None, "avail": None
+        "date": None, "region": None, "rrp": None, "demand": None, "avail": None,
+        # FCAS service prices (8 markets)
+        "raise6sec": None, "lower6sec": None,
+        "raise60sec": None, "lower60sec": None,
+        "raise5min": None, "lower5min": None,
+        "raisereg": None, "lowerreg": None,
     }
     _regionsum_cols: dict[str, int | None] = {
         "date": None, "region": None, "demand": None, "avail": None
@@ -229,6 +239,14 @@ def _parse_dispatch_zip(content: bytes, raw_ref: str) -> dict[str, DispatchPrice
                 # Older format (v4) embeds TOTALDEMAND/AVAILABLEGENERATION in PRICE
                 _price_cols["demand"] = upper.index(_HEADER_DEMAND) if _HEADER_DEMAND in upper else None
                 _price_cols["avail"] = upper.index(_HEADER_AVAIL) if _HEADER_AVAIL in upper else None
+                # FCAS market clearing prices (8 services)
+                for _hdr, _key in [
+                    ("RAISE6SECRRP", "raise6sec"), ("LOWER6SECRRP", "lower6sec"),
+                    ("RAISE60SECRRP", "raise60sec"), ("LOWER60SECRRP", "lower60sec"),
+                    ("RAISE5MINRRP", "raise5min"), ("LOWER5MINRRP", "lower5min"),
+                    ("RAISEREGRRP", "raisereg"), ("LOWERREGRRP", "lowerreg"),
+                ]:
+                    _price_cols[_key] = upper.index(_hdr) if _hdr in upper else None
             elif table == "REGIONSUM":
                 _regionsum_cols["date"] = upper.index("SETTLEMENTDATE") if "SETTLEMENTDATE" in upper else _COL_SETTLEMENTDATE
                 _regionsum_cols["region"] = upper.index("REGIONID") if "REGIONID" in upper else _COL_REGIONID
@@ -258,9 +276,20 @@ def _parse_dispatch_zip(content: bytes, raw_ref: str) -> dict[str, DispatchPrice
                 if ci["avail"] is not None and ci["avail"] < len(parts):
                     a_raw = parts[ci["avail"]].strip()
                     avail_in_price = float(a_raw) if a_raw else 0.0
+                # Extract all 8 FCAS prices (None when column absent)
+                fcas: dict[str, float | None] = {}
+                for _fk in ("raise6sec", "lower6sec", "raise60sec", "lower60sec",
+                            "raise5min", "lower5min", "raisereg", "lowerreg"):
+                    _idx = ci.get(_fk)
+                    if _idx is not None and _idx < len(parts):
+                        _v = parts[_idx].strip()
+                        fcas[_fk] = float(_v) if _v else None
+                    else:
+                        fcas[_fk] = None
+
                 existing = price_rows.get(region)
                 if existing is None or valid_time >= existing[0]:
-                    price_rows[region] = (valid_time, rrp, demand_in_price, avail_in_price)
+                    price_rows[region] = (valid_time, rrp, demand_in_price, avail_in_price, fcas)
 
             elif table == "REGIONSUM":
                 ci = _regionsum_cols
@@ -281,8 +310,10 @@ def _parse_dispatch_zip(content: bytes, raw_ref: str) -> dict[str, DispatchPrice
     # Join: REGIONSUM takes priority for demand/avail (v5); fall back to PRICE values (v4)
     prices: dict[str, DispatchPrice] = {}
     for region, row in price_rows.items():
-        valid_time, rrp, d_price, a_price = row
+        valid_time, rrp, d_price, a_price, fcas = row if len(row) == 5 else (*row, None)
         demand, avail = regionsum_rows.get(region, (d_price, a_price))
+        # Only attach FCAS dict when at least one service price was parsed
+        fcas_out = fcas if fcas and any(v is not None for v in fcas.values()) else None
         prices[region] = DispatchPrice(
             region=region,
             valid_time=valid_time,
@@ -291,6 +322,7 @@ def _parse_dispatch_zip(content: bytes, raw_ref: str) -> dict[str, DispatchPrice
             demand_mw=demand,
             availability_mw=avail,
             raw_ref=raw_ref,
+            fcas_prices=fcas_out,
         )
 
     return prices

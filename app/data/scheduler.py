@@ -469,6 +469,31 @@ async def _job_dispatch_refresh() -> None:
             except Exception as _exc:
                 logger.debug("Commentary engine failed for %s: %s", region_code, _exc)
 
+        # Drift detection: compare actual prices to cached forecast P50s
+        # On drift: invalidate forecast cache so next query triggers a full retrain
+        try:
+            from app.engines.drift_monitor import feed_actual, reset_detector
+            for region_code, dp in snapshot.regions.items():
+                _fc_cache_key = f"live_forecast_{region_code}"
+                _cached_fc = await cache.get(_fc_cache_key)
+                if isinstance(_cached_fc, dict) and _cached_fc.get("available"):
+                    _primary = _cached_fc.get("primary_model", "")
+                    _fc_list = _cached_fc.get("forecasts", [])
+                    _fc_entry = next((f for f in _fc_list if f.get("model") == _primary), None)
+                    if _fc_entry:
+                        _p50_list = _fc_entry.get("p50", [])
+                        _p50_first = float(_p50_list[0]) if _p50_list else None
+                        drifted = feed_actual(region_code, dp.price_rrp, _p50_first)
+                        if drifted:
+                            await cache.invalidate(_fc_cache_key)
+                            reset_detector(region_code)
+                            logger.info(
+                                "Drift-driven cache invalidation for %s — retrain triggered on next query",
+                                region_code,
+                            )
+        except Exception as _drift_exc:
+            logger.debug("Drift check failed (non-fatal): %s", _drift_exc)
+
         _record_success("dispatch_refresh")
         logger.debug(
             "Dispatch refresh OK — %d regions, interval %s",
@@ -533,12 +558,39 @@ async def _persist_dispatch_snapshot(snapshot: Any) -> None:
     if not rows:
         return
 
+    # Collect FCAS rows in parallel
+    fcas_rows = []
+    for region_code, dp in snapshot.regions.items():
+        if dp.fcas_prices and any(v is not None for v in dp.fcas_prices.values()):
+            from app.db.models import FcasPriceEvent
+            fcas_id = hashlib.sha256(
+                f"fcas-{region_code}-{dp.valid_time.isoformat()}".encode()
+            ).hexdigest()[:36]
+            fcas_rows.append(FcasPriceEvent(
+                id=fcas_id,
+                source="AEMO_DISPATCH_PRICE",
+                region=region_code,
+                valid_time=dp.valid_time,
+                system_time=datetime.now(timezone.utc),
+                raise_6sec_rrp=dp.fcas_prices.get("raise6sec"),
+                lower_6sec_rrp=dp.fcas_prices.get("lower6sec"),
+                raise_60sec_rrp=dp.fcas_prices.get("raise60sec"),
+                lower_60sec_rrp=dp.fcas_prices.get("lower60sec"),
+                raise_5min_rrp=dp.fcas_prices.get("raise5min"),
+                lower_5min_rrp=dp.fcas_prices.get("lower5min"),
+                raise_reg_rrp=dp.fcas_prices.get("raisereg"),
+                lower_reg_rrp=dp.fcas_prices.get("lowerreg"),
+                raw_ref=dp.raw_ref,
+            ))
+
     try:
         async with db_session() as session:
             for row in rows:
                 await session.merge(row)
+            for row in fcas_rows:
+                await session.merge(row)
             await session.commit()
-        logger.debug("Dispatch persisted: %d rows", len(rows))
+        logger.debug("Dispatch persisted: %d rows, %d FCAS rows", len(rows), len(fcas_rows))
     except Exception as exc:
         logger.warning("Dispatch persistence failed (non-fatal): %s", exc)
 

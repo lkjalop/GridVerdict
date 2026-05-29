@@ -227,25 +227,37 @@ def build_weather_consensus(
     }
 
 
-def weather_query_relevant(text: str) -> bool:
+def weather_query_relevant(
+    text: str,
+    region: str | None = None,
+    regime: str | None = None,
+) -> bool:
+    """Return True when weather context should be fetched for this query.
+
+    Three triggers:
+      1. Query keywords — explicit weather/demand/renewable language.
+      2. Regime-driven — elevated/spike/extreme in warm-climate regions (SA1, QLD1, VIC1, NSW1)
+         where temperature is a known demand driver.
+      3. Season-driven — Australian summer (Nov–Mar) in SA1/QLD1/VIC1, when heat-load demand
+         spikes are common regardless of query wording.
+    """
     lower = text.lower()
     keywords = [
-        "weather",
-        "temperature",
-        "heat",
-        "hot",
-        "cold",
-        "wind",
-        "solar",
-        "cloud",
-        "rain",
-        "storm",
-        "humidity",
-        "demand",
-        "renewable",
-        "rooftop",
+        "weather", "temperature", "heat", "hot", "cold",
+        "wind", "solar", "cloud", "rain", "storm", "humidity",
+        "demand", "renewable", "rooftop",
     ]
-    return any(k in lower for k in keywords)
+    if any(k in lower for k in keywords):
+        return True
+    # Regime-driven: elevated/spike regimes in temperature-sensitive regions
+    if regime in ("elevated", "spike", "extreme") and region in ("SA1", "QLD1", "VIC1", "NSW1"):
+        return True
+    # Season-driven: Australian summer months in hot regions
+    from datetime import datetime, timezone
+    month = datetime.now(timezone.utc).month
+    if month in (11, 12, 1, 2, 3) and region in ("SA1", "QLD1", "VIC1"):
+        return True
+    return False
 
 
 def _parse_bom_xml(xml_text: str, point: dict[str, Any], raw_ref: str) -> WeatherReading:

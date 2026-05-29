@@ -12,8 +12,12 @@ async def retrieve_market_drivers(
     window_minutes: int = 5,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Fetch constraint/interconnector rows around a dispatch interval."""
-    from sqlalchemy import select
+    """Fetch constraint/interconnector rows around a dispatch interval.
+
+    Primary: ±window_minutes of exact timestamp (live data).
+    Fallback: same hour-of-day within the last 30 archive days (proxy).
+    """
+    from sqlalchemy import select, text
     from app.db.models import MarketDriverEvent
 
     start = valid_time - timedelta(minutes=window_minutes)
@@ -27,7 +31,68 @@ async def retrieve_market_drivers(
     )
     result = await session.execute(stmt)
     rows = list(result.scalars().all())
-    return rank_driver_rows(region, rows)[:limit]
+    live_rows = rank_driver_rows(region, rows)[:limit]
+
+    if live_rows:
+        return live_rows
+
+    # Fallback: same hour-of-day proxy from archive (last 30 archive days)
+    # Lets us show representative constraint patterns even when live data gaps exist.
+    try:
+        archive_rows = await _retrieve_archive_proxy(session, region, valid_time, limit)
+        if archive_rows:
+            for r in archive_rows:
+                r["_source"] = "archive_proxy"
+            return archive_rows
+    except Exception:
+        pass
+    return []
+
+
+async def _retrieve_archive_proxy(
+    session,
+    region: str,
+    valid_time: datetime,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Return binding constraints from the archive for the same hour-of-day.
+
+    Used when live data is unavailable (archive gap or future timestamps).
+    """
+    from sqlalchemy import text
+
+    hour = valid_time.hour
+    stmt = text("""
+        SELECT *
+        FROM market_driver_events
+        WHERE region = :region
+          AND driver_type = 'constraint'
+          AND EXTRACT(HOUR FROM valid_time) = :hour
+          AND valid_time >= NOW() - INTERVAL '30 days'
+        ORDER BY ABS(EXTRACT(EPOCH FROM (valid_time - :vt))) ASC
+        LIMIT :limit
+    """)
+    try:
+        result = await session.execute(stmt, {
+            "region": region,
+            "hour": hour,
+            "vt": valid_time,
+            "limit": limit,
+        })
+        rows = result.fetchall()
+        if not rows:
+            # Wider fallback: any recent archive data for this region
+            result2 = await session.execute(text("""
+                SELECT *
+                FROM market_driver_events
+                WHERE driver_type = 'constraint'
+                ORDER BY valid_time DESC
+                LIMIT :limit
+            """), {"limit": limit})
+            rows = result2.fetchall()
+        return [dict(r._mapping) for r in rows]
+    except Exception:
+        return []
 
 
 def rank_driver_rows(region: str, rows: list[Any]) -> list[dict[str, Any]]:

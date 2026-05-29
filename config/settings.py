@@ -31,7 +31,8 @@ class Settings(BaseSettings):
 
     # Model profile
     model_profile: str = "cost_optimized"
-    enable_experimental_sequence_forecasters: bool = False
+    enable_experimental_sequence_forecasters: bool = True
+    default_forecast_horizon_intervals: int = 48   # 48 × 5min = 4-hour ahead forecast
 
     # LLM decomposer — Ollama default, Claude fallback
     ollama_base_url: str = "http://localhost:11434"

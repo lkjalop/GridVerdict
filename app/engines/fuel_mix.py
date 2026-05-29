@@ -157,7 +157,7 @@ async def _from_unit_dispatch(
         return {}
     try:
         from sqlalchemy import text
-        cutoff = (now - timedelta(minutes=30)).isoformat()
+        cutoff = now - timedelta(minutes=30)
         result = await session.execute(text("""
             SELECT u.fuel_type, SUM(u.total_cleared_mw) AS mw,
                    COUNT(DISTINCT u.duid) AS units

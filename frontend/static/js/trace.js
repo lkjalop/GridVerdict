@@ -55,6 +55,94 @@ export function renderTraceFromData(traceData, container) {
 
 // ── HTML builders ─────────────────────────────────────────────────────
 
+const _STEP_META = {
+  QUERY_RECEIVED:     { label: 'Query Received',      color: '#6366f1' },
+  SECURITY_INPUT:     { label: 'Security Scan',        color: '#0ea5e9' },
+  DECOMPOSE:          { label: 'Decomposition',        color: '#8b5cf6' },
+  SCATTER_GATHER:     { label: 'Scatter Gather',       color: '#f59e0b' },
+  EVIDENCE_ASSEMBLED: { label: 'Evidence Assembled',  color: '#10b981' },
+  VERDICT:            { label: 'Verdict',              color: '#ef4444' },
+  ANSWER_PLAN:        { label: 'Answer Plan',          color: '#3b82f6' },
+  COVERAGE_AUDIT:     { label: 'Coverage Audit',       color: '#a855f7' },
+  SECURITY_OUTPUT:    { label: 'Output Scan',          color: '#0ea5e9' },
+  COMPLETE:           { label: 'Complete',             color: '#22c55e' },
+};
+
+function _buildPipelineTimeline(events) {
+  if (!events || !events.length) return '';
+
+  const rows = events.map((ev, i) => {
+    const meta = _STEP_META[ev.step] || { label: ev.step, color: '#6b7280' };
+    const details = _buildEventDetails(ev);
+    return `
+<div class="dt-event">
+  <div class="dt-event-left">
+    <div class="dt-event-dot" style="background:${meta.color}"></div>
+    ${i < events.length - 1 ? '<div class="dt-event-line"></div>' : ''}
+  </div>
+  <div class="dt-event-body">
+    <div class="dt-event-header">
+      <span class="dt-step-badge" style="background:${meta.color}20;color:${meta.color};border:1px solid ${meta.color}40">${meta.label}</span>
+      <span class="dt-event-time">+${ev.t_ms}ms</span>
+    </div>
+    ${details ? `<div class="dt-event-details">${details}</div>` : ''}
+  </div>
+</div>`;
+  }).join('');
+
+  return `<div class="dt-timeline">${rows}</div>`;
+}
+
+function _buildEventDetails(ev) {
+  const parts = [];
+  switch (ev.step) {
+    case 'QUERY_RECEIVED':
+      if (ev.region) parts.push(`region: <b>${_esc(ev.region)}</b>`);
+      if (ev.text_len) parts.push(`${ev.text_len} chars`);
+      break;
+    case 'SECURITY_INPUT':
+    case 'SECURITY_OUTPUT':
+      parts.push(`result: <b style="color:${ev.result === 'clean' ? '#22c55e' : '#ef4444'}">${_esc(ev.result)}</b>`);
+      if (ev.signals) parts.push(`${ev.signals} signal(s)`);
+      break;
+    case 'DECOMPOSE':
+      if (ev.intent) parts.push(`intent: <b>${_esc(ev.intent)}</b>`);
+      if (ev.regions?.length) parts.push(`regions: <b>${ev.regions.join(', ')}</b>`);
+      if (ev.requested_output) parts.push(`planner: <b>${_esc(ev.requested_output)}</b>`);
+      if (ev.confidence != null) parts.push(`conf: ${Math.round(ev.confidence * 100)}%`);
+      if (ev.sub_questions?.length) parts.push(`sub-Qs: ${ev.sub_questions.join(', ')}`);
+      if (ev.clarifying) parts.push(`<span class="dt-clarify">${_esc(ev.clarifying)}</span>`);
+      break;
+    case 'SCATTER_GATHER':
+      if (ev.sources?.length) parts.push(ev.sources.map(s => `<span class="dt-source-chip">${_esc(s)}</span>`).join(' '));
+      if (ev.dispatch_price != null) parts.push(`spot: <b>$${ev.dispatch_price}/MWh</b>`);
+      if (ev.dispatch_fresh != null) parts.push(ev.dispatch_fresh ? '<span style="color:#22c55e">fresh</span>' : '<span style="color:#f59e0b">stale</span>');
+      break;
+    case 'EVIDENCE_ASSEMBLED':
+      if (ev.temporal_docs) parts.push(`TemporalRAG: ${ev.temporal_docs} docs`);
+      if (ev.fuel_sources) parts.push(`fuel sources: ${ev.fuel_sources}`);
+      if (ev.hist_dist) parts.push(`hist dist: median $${ev.hist_dist.median} (n=${ev.hist_dist.n_rows})`);
+      break;
+    case 'VERDICT':
+      if (ev.verdict) parts.push(`<b>${_esc(ev.verdict)}</b>`);
+      if (ev.action) parts.push(`action: <b>${_esc(ev.action)}</b>`);
+      if (ev.confidence != null) parts.push(`conf: ${Math.round(ev.confidence * 100)}%`);
+      if (ev.band) parts.push(`band: ${_esc(ev.band)}`);
+      break;
+    case 'ANSWER_PLAN':
+      if (ev.planner) parts.push(`planner: <b>${_esc(ev.planner)}</b>`);
+      if (ev.claim_findings) parts.push(`${ev.claim_findings} claim finding(s)`);
+      break;
+    case 'COVERAGE_AUDIT':
+      parts.push(ev.re_routed ? `re-routed → <b>${_esc(ev.suggested_planner)}</b>` : 'no re-route needed');
+      break;
+    case 'COMPLETE':
+      parts.push(`total: <b>${ev.t_ms}ms</b>`);
+      break;
+  }
+  return parts.join(' &nbsp;·&nbsp; ');
+}
+
 function _buildTraceHTML(t) {
   const validTime = _fmtTime(t.valid_time);
   const systemTime = _fmtTime(t.system_time);
@@ -65,9 +153,17 @@ function _buildTraceHTML(t) {
   const answer = t.answer || {};
   const toolCalls = t.tool_calls || [];
   const manifest = t.source_manifest || {};
+  const pipelineEvents = t.prefill?.pipeline_events || [];
 
   return `
 <div class="trace-panel">
+
+  <!-- Pipeline event timeline -->
+  ${pipelineEvents.length ? `
+  <div class="trace-section trace-section--timeline">
+    <div class="trace-section-title">Decision trace</div>
+    ${_buildPipelineTimeline(pipelineEvents)}
+  </div>` : ''}
 
   <!-- Bitemporal header -->
   <div class="trace-bitemp">

@@ -28,9 +28,11 @@ services:
       NEMWEB_CACHE_DIR: /app/cache/nemweb
       LOG_LEVEL: INFO
       GRIDVERDICT_DEV_NO_AUTH: ${GRIDVERDICT_DEV_NO_AUTH:-false}
+      ENABLE_EXPERIMENTAL_SEQUENCE_FORECASTERS: "true"
     volumes:
       - nemweb_cache:/app/cache/nemweb
       - ./frontend:/app/frontend:ro
+      - lnn_weights:/app/data/lnn_weights
     ports:
       - "8000:8000"
 
@@ -48,3 +50,4 @@ services:
 volumes:
   pgdata:
   nemweb_cache:
+  lnn_weights:

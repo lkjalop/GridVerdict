@@ -146,6 +146,12 @@ class QueryDecomposition(BaseModel):
     action_context: str | None = None        # e.g. "charge window", "dispatch decision"
     missing_inputs: list[str] = Field(default_factory=list)   # inputs not available at query time
     requested_output: str | None = None      # e.g. "probability", "narrative", "table"
+    # Structured sub-questions extracted by the restatement layer.
+    # Each item: {"type": str, "period"?: str, "entities"?: list[str]}
+    # Known types: current_price_reason, fuel_source_comparison,
+    #   historical_price_distribution, price_fluctuation, forecast_outlook,
+    #   regime_change, market_status
+    sub_questions: list[dict[str, Any]] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0, default=1.0)
     ambiguities: list[str] = Field(default_factory=list)
     clarifying_question: str | None = None

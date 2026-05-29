@@ -109,26 +109,45 @@ async def decompose(
     region_hint: str = "NSW1",
     query_id: str | None = None,
 ) -> QueryDecomposition:
-    """Decompose a query using the configured LLM backend.
+    """Hybrid decomposer: rules FIRST for safety, LLM SECOND for entity/sub-question refinement.
 
-    Falls back through: ollama → claude → rule_based on failure.
+    Pipeline:
+      1. Rule-based runs always — establishes intent, routing, OOS/unsafe detection.
+      2. If OOS or unsafe: return rule result immediately (LLM never sees it).
+      3. If LLM available: run in parallel to enrich entities and sub_questions.
+      4. Merge: rule-based routing wins; LLM contributes better entity extraction.
     Never raises — always returns a valid QueryDecomposition.
     """
-    backend = _settings.decomposer_backend
+    # Step 1: Rules always run first — safety gate, deterministic routing
+    rule_decomp = _decompose_rules(text, region_hint, query_id)
 
+    # Step 2: Hard stop for OOS/unsafe — LLM never processes these
+    if rule_decomp.intent == IntentLabel.OUT_OF_SCOPE:
+        return rule_decomp
+
+    backend = _settings.decomposer_backend
+    if backend == "rule_based":
+        return rule_decomp
+
+    # Step 3: LLM for entity/sub-question enrichment only
+    llm_decomp: QueryDecomposition | None = None
     if backend == "ollama" or backend == "auto":
         try:
-            return await _decompose_ollama(text, region_hint, query_id)
+            llm_decomp = await _decompose_ollama(text, region_hint, query_id)
         except Exception as exc:
-            logger.warning("Ollama decomposer failed (%s), trying Claude", exc)
+            logger.debug("Ollama decomposer failed (%s), using rule-based", exc)
 
-    if backend in ("claude", "auto") or _settings.anthropic_api_key:
+    if llm_decomp is None and (backend in ("claude", "auto") or _settings.anthropic_api_key):
         try:
-            return await _decompose_claude(text, region_hint, query_id)
+            llm_decomp = await _decompose_claude(text, region_hint, query_id)
         except Exception as exc:
-            logger.warning("Claude decomposer failed (%s), falling back to rule-based", exc)
+            logger.debug("Claude decomposer failed (%s), using rule-based", exc)
 
-    return _decompose_rules(text, region_hint, query_id)
+    if llm_decomp is None:
+        return rule_decomp
+
+    # Step 4: Merge — rules win on routing/safety, LLM wins on entity extraction
+    return _merge_decompositions(rule_decomp, llm_decomp, text)
 
 
 _REASONING_MODELS = {"qwen3", "qwq", "deepseek-r1", "marco-o1"}
@@ -288,6 +307,97 @@ def _parse_llm_output(
         return _decompose_rules(original_text, region_hint, query_id)
 
 
+def _merge_decompositions(
+    rule: QueryDecomposition,
+    llm: QueryDecomposition,
+    original_text: str,
+) -> QueryDecomposition:
+    """Merge rule-based and LLM decompositions.
+
+    Rules win on: routing (requested_output), requires_* flags, OOS detection.
+    LLM wins on: entity extraction (technologies, generators), confidence refinement.
+    Both contribute: ambiguities, causal_targets, sub_questions.
+    """
+    # LLM entity extraction is generally better (catches fuel types, generators)
+    merged_entities = dict(rule.entities)
+    for key, vals in (llm.entities or {}).items():
+        if vals:
+            # Regions: rule wins when it detected more regions than the LLM
+            # (e.g., rule expanded "other states" → all NEM; LLM may only see one)
+            if key == "regions" and len(merged_entities.get("regions", [])) > len(vals):
+                continue
+            merged_entities[key] = vals
+
+    # Combine ambiguities from both, deduplicated
+    merged_ambiguities = list(dict.fromkeys(rule.ambiguities + llm.ambiguities))
+
+    # Causal targets: union
+    merged_targets = list(dict.fromkeys(rule.causal_targets + llm.causal_targets))
+
+    # Classify sub_questions from the original text (deterministic, no extra LLM call)
+    sub_questions = _classify_sub_questions(original_text.lower(), rule.requested_output or "")
+
+    return rule.model_copy(update={
+        "entities": merged_entities,
+        "ambiguities": merged_ambiguities,
+        "causal_targets": merged_targets,
+        "sub_questions": sub_questions,
+        # Take slightly higher confidence from LLM if it's more certain
+        "confidence": max(rule.confidence, llm.confidence * 0.9),
+    })
+
+
+def _classify_sub_questions(lower: str, requested_output: str) -> list[dict]:
+    """Deterministically classify sub-questions from query text.
+
+    Returns a list of typed sub-question dicts. Each dict has a 'type' key
+    and optional 'period', 'entities', 'fuels' keys.
+    """
+    questions: list[dict] = []
+
+    if _asks_for_regional_comparison(lower):
+        questions.append({"type": "regional_comparison"})
+
+    # Historical price distribution
+    hist_periods = {
+        "last year": "last_year", "past year": "last_year", "12 months": "last_year",
+        "last month": "last_month", "past month": "last_month",
+        "last week": "last_week", "this week": "last_week",
+        "last quarter": "last_quarter",
+        "historically": "historical", "normally": "historical", "usual": "historical",
+        "typical": "historical", "average": "historical",
+    }
+    for phrase, period in hist_periods.items():
+        if phrase in lower:
+            questions.append({"type": "historical_price_distribution", "period": period})
+            break
+
+    # Fuel source comparison
+    fuels_mentioned = [f for f in ["coal", "solar", "hydro", "wind", "gas", "battery"] if f in lower]
+    if requested_output == "fuel_source_recommendation" or (
+        fuels_mentioned and any(w in lower for w in ["best", "buy", "instead", "compare", "vs", "versus", "cautious", "changed", "switch"])
+    ):
+        questions.append({"type": "fuel_source_comparison", "fuels": fuels_mentioned})
+
+    # Price fluctuation / sequence
+    if any(w in lower for w in ["fluctuate", "fluctuation", "moved from", "back down", "spike", "dropped"]):
+        questions.append({"type": "price_fluctuation"})
+
+    # Current price reason
+    if any(w in lower for w in ["why is", "what caused", "reason", "explain", "driving", "elevated", "high"]):
+        questions.append({"type": "current_price_reason"})
+
+    # Forecast / outlook
+    if any(w in lower for w in ["will", "forecast", "going to", "continue", "persist", "expect"]):
+        questions.append({"type": "forecast_outlook"})
+
+    # Regime change ("what changed", "before", "now instead")
+    if any(w in lower for w in ["what changed", "changed", "before", "now instead", "switch", "regime"]):
+        questions.append({"type": "regime_change"})
+
+    return questions
+
+
 def _decompose_rules(
     text: str, region_hint: str, query_id: str | None
 ) -> QueryDecomposition:
@@ -329,6 +439,7 @@ def _decompose_rules(
         "because", "what changed", "evidence supports", "what evidence",
         "price move", "backed by", "market balance", "why did", "causing",
         "cause", "fluctuate", "fluctuation", "moved from", "back down",
+        "which source", "what source",
     ]):
         intent = IntentLabel.EXPLANATION
         confidence = 0.85
@@ -342,6 +453,13 @@ def _decompose_rules(
     ]):
         intent = IntentLabel.RETROSPECTIVE
         confidence = 0.80
+    elif any(w in lower for w in [
+        "compare", "versus", "vs", "difference between",
+        "differ to", "differ from", "different to", "different from",
+        "how does", "how do",
+    ]) and any(w in lower for w in ["state", "region", "other", "compare"]):
+        intent = IntentLabel.COMPARISON
+        confidence = 0.78
     elif any(w in lower for w in ["compare", "versus", "vs", "difference between"]):
         intent = IntentLabel.COMPARISON
         confidence = 0.78
@@ -365,6 +483,13 @@ def _decompose_rules(
         "bloomberg", "refinitiv", "ice nexus", "nem-review", "nem review",
         "opennem", "wattclarity", "iress", "factset",
     ]
+    if (
+        ("source" in lower or "data" in lower)
+        and any(term in lower for term in ["stale", "fresh", "missing", "status"])
+    ):
+        intent = IntentLabel.LOOKUP
+        confidence = 0.82
+
     if any(w in lower for w in _oos_words):
         intent = IntentLabel.OUT_OF_SCOPE
         confidence = 0.90
@@ -378,43 +503,49 @@ def _decompose_rules(
             "For a comparison of GridVerdict with other NEM data platforms, see the About tab."
         )
 
-    non_nem_notes = detect_non_nem(text)
-    if non_nem_notes:
-        intent = IntentLabel.OUT_OF_SCOPE
-        confidence = 0.90
-        ambiguities.extend(non_nem_notes)
-        clarifying_question = (
-            f"{non_nem_notes[0]} GridVerdict currently covers NSW1, VIC1, QLD1, SA1, and TAS1."
-        )
-
-    # Region detection
+    # Region detection (runs before OOS check so mixed NEM+non-NEM queries are handled correctly)
     _ALL_REGIONS = known_regions()
     regions = []
-    # "all regions" / "all NEM regions" / "each region" → expand to all 5
+    _explicit_regions: list[str] = []
     if any(phrase in lower for phrase in ["all region", "all nem region", "each region", "every region", "all states", "all nem"]):
         regions = _ALL_REGIONS[:]
+        _explicit_regions = _ALL_REGIONS[:]
     else:
         alias_regions, alias_notes = detect_regions(text)
         regions.extend(alias_regions)
         ambiguities.extend(alias_notes)
+        _explicit_regions = alias_regions
     if not regions:
         regions = [region_hint]
+
+    # Mixed queries can ask for both a recommendation and a regional comparison.
+    # "how does NSW compare to other states?" → gather all five.
+    if regions != _ALL_REGIONS and _asks_for_regional_comparison(lower):
+        regions = _ALL_REGIONS[:]
+        _explicit_regions = _ALL_REGIONS[:]
+
     technologies = _extract_technologies(lower)
 
-    # Flag non-NEM geography as ambiguities even when a NEM region is detected
-    for place, note in [
-        ("darwin", "Darwin is in the Northern Territory — not connected to the NEM."),
-        ("alice springs", "Alice Springs is in the NT — not in the NEM."),
-        ("perth", "Perth uses the SWIS grid — not part of the NEM."),
-        ("western australia", "Western Australia has its own grid (SWIS/NWIS), not in the NEM."),
-    ]:
-        if place in lower:
-            ambiguities.append(note)
-            if intent != IntentLabel.OUT_OF_SCOPE:
-                clarifying_question = (
-                    f"{note} The NEM covers NSW1, VIC1, QLD1, SA1, TAS1. "
-                    "Which NEM region did you mean?"
-                )
+    non_nem_notes = detect_non_nem(text)
+    if non_nem_notes:
+        ambiguities.extend(non_nem_notes)
+        if _explicit_regions:
+            # Mixed query: NEM regions detected alongside non-NEM place — answer NEM portion.
+            # If intent was COMPARISON it can't be fulfilled (one entity is non-NEM), so degrade.
+            if intent == IntentLabel.COMPARISON:
+                intent = IntentLabel.LOOKUP
+                confidence = max(confidence - 0.1, 0.60)
+            clarifying_question = (
+                f"{non_nem_notes[0]} "
+                f"Answering for the NEM region(s) detected: {', '.join(_explicit_regions)}."
+            )
+        else:
+            # Only non-NEM geography mentioned — full refusal
+            intent = IntentLabel.OUT_OF_SCOPE
+            confidence = 0.90
+            clarifying_question = (
+                f"{non_nem_notes[0]} GridVerdict currently covers NSW1, VIC1, QLD1, SA1, and TAS1."
+            )
 
     if regions:
         for place, nem in [("penrith", "NSW1"), ("griffith", "NSW1"), ("parramatta", "NSW1"),
@@ -429,6 +560,27 @@ def _decompose_rules(
     if season_buckets and intent == IntentLabel.LOOKUP:
         intent = IntentLabel.RETROSPECTIVE
         confidence = 0.82
+
+    # Price threshold extraction — "$150", "below $200", "above $300", "P90", "under $100"
+    import re as _re
+    _threshold_raw = _re.findall(
+        r'(?:below|above|under|over|less than|more than|exceed|drop to|reach|hit|target)?\s*'
+        r'\$\s*(\d[\d,]*(?:\.\d+)?)\s*/?\s*mwh?|'
+        r'(?:below|above|under|over|less than|more than|exceed|drop to|reach|hit|target)\s+\$?\s*(\d[\d,]*(?:\.\d+)?)',
+        lower,
+    )
+    spike_thresholds = []
+    for match in _threshold_raw:
+        raw = (match[0] or match[1]).replace(",", "")
+        try:
+            val = float(raw)
+            if 0 < val < 20000:
+                spike_thresholds.append(val)
+        except ValueError:
+            pass
+    # Also detect percentile references ("P90", "P10", "90th percentile")
+    _pct_refs = _re.findall(r'\b[Pp](\d+)\b|\b(\d+)(?:th|rd|nd|st)\s+percentile', text)
+    price_percentiles = [int(p[0] or p[1]) for p in _pct_refs if int(p[0] or p[1]) <= 99]
 
     requires_history = any(w in lower for w in [
         "historical", "last", "yesterday", "when", "previous", "analogs",
@@ -472,9 +624,13 @@ def _decompose_rules(
         requires_live_market=intent != IntentLabel.OUT_OF_SCOPE,
         requires_incident_timeline=intent in (IntentLabel.EXPLANATION, IntentLabel.ACTION_RECOMMENDATION),
         causal_targets=causal_targets,
+        spike_thresholds=spike_thresholds,
         requested_output=requested_output,
         confidence=confidence,
-        ambiguities=ambiguities,
+        ambiguities=ambiguities + (
+            [f"Threshold detected: ${t:.0f}/MWh" for t in spike_thresholds[:2]]
+            if spike_thresholds else []
+        ),
         clarifying_question=clarifying_question,
         region_corrections=[],
     )
@@ -488,6 +644,26 @@ def _has_market_weather_context(lower: str) -> bool:
         "nsw", "nsw1", "vic", "vic1", "qld", "qld1", "sa1", "tas", "tas1",
     ]
     return any(term in lower for term in market_terms)
+
+
+def _asks_for_regional_comparison(lower: str) -> bool:
+    """True when a query asks to compare NEM regions or states."""
+    phrases = [
+        "other state", "other states", "other region", "other regions",
+        "rest of the nem", "rest of nem", "rest of the market",
+        "across state", "across states", "across region", "across regions",
+        "compared to other", "compare to other", "compare with other",
+        "all other", "every state", "each state", "each region",
+        "all nem region", "all nem regions", "all states",
+        "differ to other", "differ from other",
+        "different to other", "different from other",
+    ]
+    if any(phrase in lower for phrase in phrases):
+        return True
+    return bool(
+        any(term in lower for term in ["compare", "versus", "vs", "difference between"])
+        and any(scope in lower for scope in ["state", "states", "region", "regions", "nem"])
+    )
 
 
 def _extract_causal_targets(lower: str) -> list[str]:
@@ -556,13 +732,22 @@ def _requested_output_for(
     # Fuel/source comparison must come before ACTION_RECOMMENDATION and COMPARISON —
     # "why coal instead of hydro, should I be cautious?" is a fuel question even if
     # "should I" is present. Multi-part queries must not lose their primary intent.
-    if any(t in lower for t in ["coal", "solar", "hydro", "wind", "gas", "battery"]) and any(
+    fuel_specific = any(t in lower for t in ["coal", "solar", "hydro", "wind", "gas", "battery"])
+    fuel_question = any(
         w in lower for w in [
             "buy", "best", "source", "instead", "prefer", "choose",
             "compare", "versus", "vs", "contributes", "contribute",
             "cautious", "changed", "change", "switch", "now instead",
+            "cheaper", "cheapest", "fuel",
         ]
-    ):
+    )
+    generic_source_question = (
+        not any(term in lower for term in ["stale", "fresh", "missing", "status"])
+    ) and any(
+        phrase in lower
+        for phrase in ["which source", "what source", "source is normally", "normally cheaper"]
+    )
+    if (fuel_specific and fuel_question) or generic_source_question:
         return "fuel_source_recommendation"
     if intent == IntentLabel.ACTION_RECOMMENDATION:
         return "portfolio_action"

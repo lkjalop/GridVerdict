@@ -59,6 +59,7 @@ async def create_session(
     )
     db.add(session)
     await db.flush()
+    await db.commit()   # commit before response so the query route sees it immediately
     await db.refresh(session)
     return SessionOut(
         id=session.id,

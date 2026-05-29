@@ -177,7 +177,7 @@ class TestQueryLatencyMetric:
             intent=IntentLabel.LOOKUP,
             entities={"regions": []},
             time_range=None,
-            model_dump=lambda: {"intent": "lookup", "entities": {}, "time_range": None},
+            model_dump=lambda **kw: {"intent": "lookup", "entities": {}, "time_range": None},
         )
 
         with (
@@ -228,7 +228,7 @@ class TestQueryLatencyMetric:
             intent=IntentLabel.LOOKUP,
             entities={"regions": []},
             time_range=None,
-            model_dump=lambda: {"intent": "lookup", "entities": {}, "time_range": None},
+            model_dump=lambda **kw: {"intent": "lookup", "entities": {}, "time_range": None},
         )
 
         with (

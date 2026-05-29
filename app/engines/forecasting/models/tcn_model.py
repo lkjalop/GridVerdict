@@ -29,6 +29,15 @@ try:
     from torch import nn
     _HAS_TORCH = True
 except ImportError:
+    torch = None
+
+    class _MissingModule:
+        pass
+
+    class _MissingNN:
+        Module = _MissingModule
+
+    nn = _MissingNN()
     _HAS_TORCH = False
 
 

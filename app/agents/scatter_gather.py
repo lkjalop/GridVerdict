@@ -23,7 +23,7 @@ import asyncio
 import logging
 import time as _time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.data.aemo_live_client import AEMOLiveClient, DispatchPrice, LiveMarketSnapshot
@@ -46,11 +46,12 @@ class GatherResult:
     predispatch: list[dict[str, Any]] = field(default_factory=list)
     news_items: list[dict[str, Any]] = field(default_factory=list)
     weather: dict[str, Any] | None = None
+    fcas: dict[str, Any] | None = None             # FcasOpportunityContext.to_dict()
     driver_events: list[dict[str, Any]] = field(default_factory=list)
     unit_events: list[dict[str, Any]] = field(default_factory=list)
     recent_dispatch: list[dict[str, Any]] = field(default_factory=list)
     tasks_ok: int = 0
-    tasks_total: int = 6
+    tasks_total: int = 7
     elapsed_ms: float = 0.0
     # Staleness flags set when cache data is older than the configured threshold
     notices_stale: bool = False
@@ -144,13 +145,14 @@ async def scatter_gather(
         if isinstance(t1_raw, Exception):
             logger.warning("ScatterGather T1 (dispatch) failed: %s", t1_raw)
 
-    # T2–T7 — parallel tasks wrapped so they never raise
+    # T2–T8 — parallel tasks wrapped so they never raise
     _ptasks = [
         ("AEMO_MARKET_NOTICES",    _task_notices(region, cache)),
         ("HIPPOGRAPH_ANALOGS",     _task_analogs(region, dispatch_for_analogs)),
         ("LIVE_QUANTILE_FORECAST", _task_forecast(region, cache)),
         ("AEMO_PREDISPATCH",       _task_predispatch(region, client, cache)),
         ("NEM_NEWS_RSS",           _task_news_sentiment(region, cache)),
+        ("FCAS_PRICES",            _task_fcas(region, dispatch_for_analogs)),
     ]
     if include_weather:
         _ptasks.append(("WEATHER_CONSENSUS", _task_weather(region, cache)))
@@ -173,18 +175,19 @@ async def scatter_gather(
         _pdata.append(data)
         source_statuses[src] = status
 
-    notices_result    = _pdata[0] if isinstance(_pdata[0], list) else []
-    analogs_result    = _pdata[1] if isinstance(_pdata[1], list) else []
+    notices_result       = _pdata[0] if isinstance(_pdata[0], list) else []
+    analogs_result       = _pdata[1] if isinstance(_pdata[1], list) else []
     live_forecast_result = _pdata[2] if isinstance(_pdata[2], dict) else None
-    predispatch_result = _pdata[3] if isinstance(_pdata[3], list) else []
-    news_items_result = _pdata[4] if isinstance(_pdata[4], list) else []
-    _weather_idx = 5
+    predispatch_result   = _pdata[3] if isinstance(_pdata[3], list) else []
+    news_items_result    = _pdata[4] if isinstance(_pdata[4], list) else []
+    fcas_result          = _pdata[5] if isinstance(_pdata[5], dict) else None
+    _weather_idx = 6
     weather_result = (
         _pdata[_weather_idx]
         if include_weather and len(_pdata) > _weather_idx and isinstance(_pdata[_weather_idx], dict)
         else None
     )
-    _commentary_idx = 5 + (1 if include_weather else 0)
+    _commentary_idx = 6 + (1 if include_weather else 0)
     commentary_result: list[dict[str, Any]] = (
         _pdata[_commentary_idx]
         if include_commentary and len(_pdata) > _commentary_idx and isinstance(_pdata[_commentary_idx], list)
@@ -214,11 +217,12 @@ async def scatter_gather(
 
     ok_flags = [
         dispatch_result is not None,
-        _pdata[0] is not None,
-        _pdata[1] is not None,
-        _pdata[2] is not None,
-        _pdata[3] is not None,
-        _pdata[4] is not None,
+        _pdata[0] is not None,  # notices
+        _pdata[1] is not None,  # analogs
+        _pdata[2] is not None,  # forecast
+        _pdata[3] is not None,  # predispatch
+        _pdata[4] is not None,  # news
+        _pdata[5] is not None,  # fcas
     ]
     if include_weather:
         ok_flags.append(_pdata[_weather_idx] is not None if len(_pdata) > _weather_idx else False)
@@ -247,9 +251,10 @@ async def scatter_gather(
         predispatch=predispatch_result,
         news_items=news_items_result,
         weather=weather_result,
+        fcas=fcas_result,
         commentary_context=commentary_result,
         tasks_ok=tasks_ok,
-        tasks_total=6 + (1 if include_weather else 0) + (1 if include_commentary else 0),
+        tasks_total=7 + (1 if include_weather else 0) + (1 if include_commentary else 0),
         elapsed_ms=elapsed,
         notices_stale=notices_stale,
         news_stale=news_stale,
@@ -279,13 +284,26 @@ async def _task_dispatch(
 
 
 async def _task_notices(region: str, cache: MarketCache) -> list[dict[str, Any]]:
-    """T2 — fetch active AEMO market notices (from cache only for now)."""
+    """T2 — fetch active AEMO market notices; live-fetch when cache is cold."""
     cached = await cache.get(f"notices_{region}")
     if cached and isinstance(cached, list):
         return cached
-    # AEMO notices client will be wired via app/mcp/aemo_notices_client.py
-    # Returning empty list is valid — contributes 0 to news_tier
-    return []
+
+    # Cache miss — call the live client so cold-start queries still get notices
+    try:
+        from app.mcp.aemo_notices_client import AEMOMarketNoticesClient
+        _client = AEMOMarketNoticesClient()
+        async with asyncio.timeout(_TASK_TIMEOUT):
+            notices: list[dict] = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _client.fetch_active_notices(region=region),
+            )
+        if notices:
+            await cache.set(f"notices_{region}", notices)
+        return notices
+    except Exception as exc:
+        logger.debug("T2 notices live fetch failed for %s: %s", region, exc)
+        return []
 
 
 _FORECAST_CACHE_TTL = 300   # 5 min — one dispatch cycle
@@ -317,9 +335,9 @@ async def _task_forecast(region: str, cache: MarketCache | None = None) -> dict[
 
     try:
         from app.engines.forecasting.live_forecast import run_live_forecast
-        async with asyncio.timeout(30.0):
+        async with asyncio.timeout(10.0):  # startup warmup means cache is hot; 10s is ample
             result = await run_live_forecast(
-                region, lookback_days=14, horizon_intervals=1,
+                region, lookback_days=14, horizon_intervals=48,
                 weather_context=weather_context,
             )
 
@@ -413,6 +431,26 @@ async def _task_news_sentiment(region: str, cache: MarketCache) -> list[dict[str
     return result[:10]
 
 
+async def _task_fcas(
+    region: str,
+    dispatch: "DispatchPrice | None",
+) -> dict[str, Any] | None:
+    """T8 — fetch FCAS market clearing prices from DB for BESS opportunity context."""
+    if dispatch is None:
+        return None
+    try:
+        from app.engines.fcas_attribution import get_fcas_context
+        from app.db.session import db_session
+        async with db_session() as session:
+            ctx = await get_fcas_context(session, region, dispatch.valid_time)
+        if not ctx.available:
+            return None
+        return ctx.to_dict()
+    except Exception as exc:
+        logger.debug("T8 FCAS task failed for %s: %s", region, exc)
+        return None
+
+
 async def _task_weather(region: str, cache: MarketCache) -> dict[str, Any] | None:
     """T7 — read cached weather consensus or fetch on demand when weather is relevant."""
     cache_key = f"weather_{region}"
@@ -448,6 +486,206 @@ async def _task_commentary_context(region: str) -> list[dict[str, Any]]:
     except Exception as exc:
         logger.debug("ScatterGather T8 (commentary context) failed for %s: %s", region, exc)
         return []
+
+
+async def scatter_gather_historical(
+    region: str,
+    anchor_time: datetime,
+    session,
+) -> "GatherResult":
+    """Historical evidence gather — builds GatherResult entirely from DB rows.
+
+    Used when the query asks about a past dispatch interval (retrospective intent).
+    Returns a GatherResult with dispatch_fresh=False; live_forecast is always None.
+    Falls back gracefully when DB rows are absent for the requested anchor time.
+    """
+    from sqlalchemy import select, and_
+    from app.db.models import MarketEvent, MarketDriverEvent
+    from app.data.aemo_live_client import DispatchPrice
+    from app.mcp.source_status import SourceStatus
+
+    _start = datetime.now(timezone.utc)
+    window = 10  # ±10 min around anchor
+    t_lo = anchor_time - timedelta(minutes=window)
+    t_hi = anchor_time + timedelta(minutes=window)
+
+    # T1: Historical dispatch price from market_events
+    dispatch_result: DispatchPrice | None = None
+    try:
+        dp_row = (await session.execute(
+            select(MarketEvent)
+            .where(
+                and_(
+                    MarketEvent.source == "AEMO_DISPATCH_PRICE",
+                    MarketEvent.region == region.upper(),
+                    MarketEvent.valid_time >= t_lo,
+                    MarketEvent.valid_time <= t_hi,
+                )
+            )
+            .order_by(MarketEvent.valid_time.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+
+        if dp_row:
+            dispatch_result = DispatchPrice(
+                region=dp_row.region,
+                valid_time=dp_row.valid_time,
+                system_time=dp_row.system_time,
+                price_rrp=float(dp_row.price_rrp or 0),
+                demand_mw=float(dp_row.demand_mw or 0),
+                availability_mw=float(dp_row.availability_mw or 0),
+                raw_ref=dp_row.raw_ref or "archive",
+            )
+    except Exception as exc:
+        logger.debug("Historical dispatch query failed for %s@%s: %s", region, anchor_time, exc)
+
+    # T2: Historical notices — try archive client (best-effort, 10s timeout)
+    notices_result: list[dict[str, Any]] = []
+    try:
+        from app.mcp.aemo_notices_client import AEMOMarketNoticesClient
+        _nc = AEMOMarketNoticesClient()
+        _notice_start = anchor_time - timedelta(hours=2)
+        _notice_end = anchor_time + timedelta(hours=2)
+        async with asyncio.timeout(10.0):
+            raw_notices = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _nc.fetch_archive_notices(_notice_start, _notice_end),
+            )
+        for item in raw_notices:
+            if item.region is None or item.region.upper() == region.upper():
+                notices_result.append({
+                    "notice_type": item.title.split(":")[0].strip() if item.title else None,
+                    "reason": item.summary or "",
+                    "region": item.region,
+                    "timestamp": item.timestamp.isoformat() if item.timestamp else None,
+                    "url": item.url,
+                    "credibility_tier": item.credibility_tier,
+                })
+    except Exception as exc:
+        logger.debug("Historical notices unavailable for %s@%s: %s", region, anchor_time, exc)
+
+    # T3: Historical analogs based on the historical dispatch state
+    analogs_result: list[dict[str, Any]] = []
+    if dispatch_result:
+        try:
+            from app.engines.analog_retriever import get_analogs
+            from domain.nem.adapter import classify_regime
+            _regime = classify_regime(dispatch_result.price_rrp, region)
+            analogs_result = await asyncio.get_event_loop().run_in_executor(
+                None, get_analogs, region, dispatch_result.price_rrp,
+                dispatch_result.demand_mw, dispatch_result.availability_mw,
+                _regime, dispatch_result.valid_time,
+            )
+        except Exception as exc:
+            logger.debug("Historical analogs unavailable for %s: %s", region, exc)
+
+    # T4: Historical driver events (constraints + interconnectors)
+    driver_events: list[dict[str, Any]] = []
+    try:
+        from app.engines.driver_attribution import retrieve_market_drivers
+        driver_events = await retrieve_market_drivers(session, region, anchor_time)
+    except Exception as exc:
+        logger.debug("Historical driver events unavailable for %s: %s", region, exc)
+
+    # T5: Historical FCAS prices from fcas_price_events
+    fcas_result: dict[str, Any] | None = None
+    try:
+        from app.engines.fcas_attribution import get_fcas_context
+        fcas_ctx = await get_fcas_context(session, region, anchor_time)
+        if fcas_ctx.available:
+            fcas_result = fcas_ctx.to_dict()
+    except Exception as exc:
+        logger.debug("Historical FCAS unavailable for %s: %s", region, exc)
+
+    # Recent dispatch window around anchor (price trend context)
+    recent_dispatch: list[dict[str, Any]] = []
+    try:
+        trend_start = anchor_time - timedelta(minutes=70)
+        rows = (await session.execute(
+            select(MarketEvent)
+            .where(
+                and_(
+                    MarketEvent.source == "AEMO_DISPATCH_PRICE",
+                    MarketEvent.region == region.upper(),
+                    MarketEvent.valid_time >= trend_start,
+                    MarketEvent.valid_time <= anchor_time,
+                )
+            )
+            .order_by(MarketEvent.valid_time.desc())
+            .limit(32)
+        )).scalars().all()
+        recent_dispatch = [
+            {
+                "valid_time": r.valid_time,
+                "price_rrp": r.price_rrp,
+                "demand_mw": r.demand_mw,
+                "availability_mw": r.availability_mw,
+                "headroom_mw": max((r.availability_mw or 0) - (r.demand_mw or 0), 0.0),
+                "raw_ref": r.raw_ref,
+            }
+            for r in rows
+        ]
+    except Exception as exc:
+        logger.debug("Historical recent-dispatch unavailable for %s: %s", region, exc)
+
+    elapsed = (datetime.now(timezone.utc) - _start).total_seconds() * 1000
+    tasks_ok = sum([
+        dispatch_result is not None,
+        bool(notices_result),
+        bool(analogs_result),
+        bool(driver_events),
+    ])
+    dp_status = (
+        SourceStatus.from_data(
+            "AEMO_DISPATCH_PRICE_ARCHIVE",
+            dispatch_result.valid_time,
+            latency_ms=elapsed,
+        ) if dispatch_result
+        else SourceStatus.unavailable("AEMO_DISPATCH_PRICE_ARCHIVE", "no archive row found", elapsed)
+    )
+
+    return GatherResult(
+        dispatch=dispatch_result,
+        dispatch_fresh=False,
+        notices=notices_result,
+        analogs=analogs_result,
+        forecast=None,
+        live_forecast=None,
+        predispatch=[],
+        news_items=[],
+        weather=None,
+        fcas=fcas_result,
+        driver_events=driver_events,
+        recent_dispatch=recent_dispatch,
+        tasks_ok=tasks_ok,
+        tasks_total=4,
+        elapsed_ms=elapsed,
+        notices_stale=False,
+        news_stale=False,
+        source_statuses={"AEMO_DISPATCH_PRICE_ARCHIVE": dp_status},
+    )
+
+
+def _merge_historical_and_live(hist: GatherResult, live: GatherResult) -> GatherResult:
+    """Merge historical evidence with live forecast/weather/FCAS context.
+
+    Historical gather provides: dispatch, notices, drivers, analogs, recent_dispatch.
+    Live gather provides: forecast, live_forecast, predispatch, weather, fcas (live).
+    """
+    from dataclasses import replace
+    return replace(
+        hist,
+        forecast=live.forecast,
+        live_forecast=live.live_forecast,
+        predispatch=live.predispatch,
+        weather=live.weather,
+        fcas=live.fcas if live.fcas else hist.fcas,
+        news_items=live.news_items,
+        tasks_total=hist.tasks_total + live.tasks_total,
+        tasks_ok=hist.tasks_ok + live.tasks_ok,
+        elapsed_ms=hist.elapsed_ms + live.elapsed_ms,
+        source_statuses={**hist.source_statuses, **live.source_statuses},
+    )
 
 
 async def _is_cache_stale(cache: MarketCache, timestamp_key: str, max_age_s: int) -> bool:

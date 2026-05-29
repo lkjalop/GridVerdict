@@ -55,6 +55,37 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("HippoGraph rebuild failed (cold start, no analogs yet): %s", exc)
 
+    # Bootstrap LNN trainers from DB so they're ready immediately after restart
+    try:
+        from app.db.session import db_session
+        from app.engines.forecasting.inference import bootstrap_from_db
+        async with db_session() as db:
+            await bootstrap_from_db(db, lookback_days=7)
+        logger.info("LNN bootstrap from DB complete")
+    except Exception as exc:
+        logger.warning("LNN bootstrap failed (will train from live polls): %s", exc)
+
+    # Warm live forecast cache per region so T4 in ScatterGather hits cache on first query
+    # Fire as background tasks — they must not block startup.
+    async def _warm_forecast_cache(region: str) -> None:
+        try:
+            from app.engines.forecasting.live_forecast import run_live_forecast
+            from app.data.cache import get_cache as _get_cache
+            result = await run_live_forecast(region, lookback_days=14, horizon_intervals=1)
+            if result.get("available"):
+                await _get_cache().set(f"live_forecast_{region}", result)
+                logger.info(
+                    "Forecast cache warmed for %s (primary: %s)",
+                    region, result.get("primary_model", "?"),
+                )
+        except Exception as exc:
+            logger.debug("Forecast warmup failed for %s (non-fatal): %s", region, exc)
+
+    for _r in ["NSW1", "VIC1", "QLD1", "SA1", "TAS1"]:
+        import asyncio as _asyncio
+        _asyncio.create_task(_warm_forecast_cache(_r))
+    logger.info("Live forecast cache warmup scheduled for all 5 NEM regions")
+
     # Start background scheduler (dispatch + notices + archive backfill)
     await start_scheduler()
 
@@ -97,25 +128,17 @@ def create_app() -> FastAPI:
     from app.api.middleware import RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware)
 
-    # API routes under /api prefix
-    app.include_router(routes_health.router, prefix="/api")
-    app.include_router(routes_auth.router, prefix="/api")
-    app.include_router(routes_market.router, prefix="/api")
-    app.include_router(routes_sessions.router, prefix="/api")
-    app.include_router(routes_query.router, prefix="/api")
-    app.include_router(routes_trace.router, prefix="/api")
-    app.include_router(routes_backtest.router, prefix="/api")
-    app.include_router(routes_constraints.router, prefix="/api")
-    app.include_router(routes_models.router, prefix="/api")
-    app.include_router(routes_rebid.router, prefix="/api")
-    app.include_router(routes_security.router, prefix="/api")
-    app.include_router(routes_events.router, prefix="/api")
-    app.include_router(routes_temporalrag.router, prefix="/api")
-    app.include_router(routes_incidents.router, prefix="/api")
-    app.include_router(routes_portfolio.router, prefix="/api")
-    app.include_router(routes_compliance.router, prefix="/api")
-    app.include_router(routes_commentary.router, prefix="/api")
-    app.include_router(routes_metrics.router, prefix="/api")
+    # API routes — registered under both /api (legacy) and /api/v1 (versioned).
+    # Clients can migrate to /api/v1 at their own pace; both prefixes are identical.
+    _all_routers = [
+        routes_health, routes_auth, routes_market, routes_sessions, routes_query,
+        routes_trace, routes_backtest, routes_constraints, routes_models, routes_rebid,
+        routes_security, routes_events, routes_temporalrag, routes_incidents,
+        routes_portfolio, routes_compliance, routes_commentary, routes_metrics,
+    ]
+    for _mod in _all_routers:
+        app.include_router(_mod.router, prefix="/api")
+        app.include_router(_mod.router, prefix="/api/v1")
 
     @app.get("/api/tools", include_in_schema=True, tags=["mcp"])
     async def list_tools():

@@ -60,10 +60,12 @@ window.gvCharts = {
   },
 
   /**
-   * Update forecast bands from LNN output (Week 4).
+   * Update forecast bands.
+   * Swimlane natively handles both the full API format {primary_model, forecasts[]}
+   * and the flat fallback format {times, p10, p50, p90} — pass through unchanged.
    */
   setForecast(forecast) {
-    this.swimlane?.setForecast(forecast);
+    this.swimlane?.setForecast(forecast || null);
   },
 
   setHistory(points) {

@@ -133,6 +133,10 @@ def _build_evidence_manifest(refs: list[EvidenceRefSchema], sources: WhySources)
             "staleness_seconds": max(0, int((now - ref.interval).total_seconds())),
             "caveat": _manifest_caveat(ref.source, sources),
         })
+    # Append LNN provenance entry when the model is active and contributed a forecast
+    lnn_entry = _lnn_provenance_entry(sources)
+    if lnn_entry:
+        manifest.append(lnn_entry)
     return manifest
 
 
@@ -147,7 +151,38 @@ def _manifest_caveat(source: str, sources: WhySources) -> str:
         return "Official dispatch interval observation; explanation still depends on driver evidence."
     if source == "WEATHER_CONSENSUS":
         return "Weather consensus is contextual demand/renewables evidence, not a standalone price cause."
+    if "LNN" in source or "lnn" in source:
+        return "LNN (Liquid Time-Constant Network): probabilistic quantile forecast with spike-risk head. Caveat: trained on dispatch history only."
     return "Evidence is cited as observed input, not as an instruction."
+
+
+def _lnn_provenance_entry(sources: WhySources) -> dict | None:
+    """Build an evidence manifest entry for the active LNN model when it contributes."""
+    lnn = next(
+        (m for m in sources.forecast.model_detail
+         if m.model in {"lnn", "lnn_cfc"} and m.available),
+        None,
+    )
+    if lnn is None:
+        return None
+    now = datetime.now(timezone.utc)
+    entry: dict = {
+        "source_table": "LNN_QUANTILE_FORECAST",
+        "interval": now.isoformat(),
+        "region_or_element": sources.current.region,
+        "field": "p10/p50/p90",
+        "raw_file_hash": "lnn_in_process",
+        "acquisition_run_id": "live_forecast",
+        "staleness_seconds": 0,
+        "caveat": "LNN (Liquid Time-Constant Network): probabilistic quantile forecast with spike-risk head.",
+        "model": lnn.model,
+        "p10": lnn.p10,
+        "p50": lnn.p50,
+        "p90": lnn.p90,
+    }
+    if lnn.spike_probs:
+        entry["spike_probs"] = lnn.spike_probs
+    return entry
 
 
 def _known_missing_before_action(missing_data: list[str]) -> list[str]:

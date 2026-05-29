@@ -93,3 +93,13 @@ tools:
     poll_interval_s: 300
     staleness_threshold_s: 900
     enabled: true
+
+  - name: fcas_prices
+    description: "FCAS market clearing prices (8 services: raise/lower × 6s/60s/5min/reg) from AEMO DISPATCHPRICE — used for BESS opportunity valuation"
+    category: fcas
+    endpoint: "internal:fcas_price_events"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 300
+    staleness_threshold_s: 600
+    enabled: true

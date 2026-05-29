@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from app.engines.decomposition import _decompose_rules, _parse_llm_output
+from app.engines.decomposition import _classify_sub_questions, _decompose_rules, _parse_llm_output
 from app.engines.geo_aliases import load_geo_aliases
 from app.core.schema import IntentLabel
 
@@ -246,6 +246,27 @@ def test_rule_based_fuel_buy_question_requests_fuel_source_output():
     assert result.entities["technologies"] == ["coal", "solar", "hydro"]
 
 
+def test_rule_based_generic_source_question_requests_fuel_source_output():
+    result = _decompose_rules(
+        "why is nsw prices elevated? which source is normally cheaper?",
+        "NSW1",
+        None,
+    )
+    assert result.intent == IntentLabel.EXPLANATION
+    assert result.requested_output == "fuel_source_recommendation"
+
+
+def test_rule_based_price_fluctuation_question_requests_price_path_output():
+    result = _decompose_rules(
+        "why did the price fluctuate from 143 to 167 to 165 and then back down to 140 again?",
+        "NSW1",
+        None,
+    )
+    assert result.intent == IntentLabel.EXPLANATION
+    assert result.requested_output == "price_fluctuation_attribution"
+    assert "price_path" in result.causal_targets
+
+
 def test_rule_based_data_freshness_status_output():
     result = _decompose_rules("What sources are stale right now?", "NSW1", None)
     assert result.intent == IntentLabel.LOOKUP
@@ -257,6 +278,21 @@ def test_rule_based_comparison_output_contract():
     assert result.intent == IntentLabel.COMPARISON
     assert result.requested_output == "regional_comparison"
     assert set(result.entities["regions"]) == {"NSW1", "VIC1", "QLD1", "SA1", "TAS1"}
+
+
+def test_rule_based_mixed_state_comparison_and_source_recommendation():
+    query = "how is nsw price differ to other states? which source do you recommend?"
+    result = _decompose_rules(query, "NSW1", None)
+
+    assert result.intent == IntentLabel.ACTION_RECOMMENDATION
+    assert result.requested_output == "fuel_source_recommendation"
+    assert set(result.entities["regions"]) == {"NSW1", "VIC1", "QLD1", "SA1", "TAS1"}
+
+    sub_questions = _classify_sub_questions(query, result.requested_output or "")
+    assert {item["type"] for item in sub_questions} >= {
+        "regional_comparison",
+        "fuel_source_comparison",
+    }
 
 
 @pytest.mark.parametrize("query", [

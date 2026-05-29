@@ -72,6 +72,7 @@ export function gridverdictApp() {
       claimMap: true,
       incidentTimeline: true,
       provenance: false,
+      decisionPath: true,
     },
 
     // ── Incident timeline ─────────────────────────────────────────
@@ -322,7 +323,10 @@ export function gridverdictApp() {
           role: 'assistant',
           text: why,
           verdict: resp.verdict,
+          fullResp: resp,
           viewportType: resp.viewport_type,
+          traceId: resp.decomposition?.trace_id || null,
+          suggestedQuestions: resp.suggested_questions || [],
           id: resp.query_id + '-a',
         });
 
@@ -331,6 +335,10 @@ export function gridverdictApp() {
         this.viewport.type = mappedTab;
         this.viewport.activeTab = mappedTab;
         this.viewport.data = resp;
+        // Update forecast chart bands from the query response's live_forecast
+        if (resp.live_forecast?.available && window.gvCharts) {
+          window.gvCharts.setForecast(resp.live_forecast);
+        }
         // Auto-expand analogs if enough matches came back
         if (resp.analogs?.length >= 3) this.answerExpanded.analogs = true;
         // Render analog chart in audit panel if visible
@@ -449,9 +457,10 @@ export function gridverdictApp() {
         this._sseRetryMs = 5000;
       };
 
-      // dispatch_updated → refresh market state
+      // dispatch_updated → refresh market state + forecast overlay
       es.addEventListener('dispatch_updated', () => {
         this.refreshMarket().catch(() => {});
+        this.refreshForecast().catch(() => {});
       });
 
       // forecast_updated → refresh forecast overlay
@@ -745,6 +754,127 @@ export function gridverdictApp() {
       this.answerExpanded[key] = !this.answerExpanded[key];
     },
 
+    // ── Decision Path pipeline helpers ────────────────────────────
+    _pipelineColor(step) {
+      return {
+        QUERY_RECEIVED:     '#6366f1',
+        SECURITY_INPUT:     '#0ea5e9',
+        DECOMPOSE:          '#8b5cf6',
+        SCATTER_GATHER:     '#f59e0b',
+        EVIDENCE_ASSEMBLED: '#10b981',
+        VERDICT:            '#ef4444',
+        ANSWER_PLAN:        '#3b82f6',
+        COVERAGE_AUDIT:     '#a855f7',
+        SECURITY_OUTPUT:    '#0ea5e9',
+        COMPLETE:           '#22c55e',
+      }[step] || '#6b7280';
+    },
+    _pipelineLabel(step) {
+      return {
+        QUERY_RECEIVED:     'Query Received',
+        SECURITY_INPUT:     'Security Scan',
+        DECOMPOSE:          'Decomposition',
+        SCATTER_GATHER:     'Data Gather',
+        EVIDENCE_ASSEMBLED: 'Evidence',
+        VERDICT:            'Verdict',
+        ANSWER_PLAN:        'Answer Plan',
+        COVERAGE_AUDIT:     'Coverage Audit',
+        SECURITY_OUTPUT:    'Output Scan',
+        COMPLETE:           'Complete',
+      }[step] || step;
+    },
+    _pipelineDetailHtml(ev, resp) {
+      const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const chip = (txt, col) => `<span style="display:inline-block;background:${col}1a;color:${col};border:1px solid ${col}40;border-radius:3px;padding:1px 6px;font-size:10px;font-family:var(--font-mono);margin:1px;">${esc(txt)}</span>`;
+      const muted = txt => `<span style="color:var(--text-muted);font-size:11px;">${esc(txt)}</span>`;
+      const warn  = txt => `<span style="color:var(--verdict-low);font-size:11px;">${esc(txt)}</span>`;
+      const ok    = txt => `<span style="color:var(--verdict-supported);font-size:11px;">${esc(txt)}</span>`;
+      const lines = [];
+
+      if (ev.step === 'QUERY_RECEIVED') {
+        lines.push(muted(`${ev.region || '—'} region · ${ev.text_len || 0} chars`));
+
+      } else if (ev.step === 'SECURITY_INPUT' || ev.step === 'SECURITY_OUTPUT') {
+        const col = ev.result === 'clean' ? '#22c55e' : '#ef4444';
+        lines.push(chip(ev.result || '—', col));
+        if (ev.signals != null) lines.push(muted(`${ev.signals} signal(s)`));
+
+      } else if (ev.step === 'DECOMPOSE') {
+        if (ev.intent) lines.push(chip(ev.intent.replace(/_/g,' '), '#8b5cf6'));
+        if (ev.regions?.length) lines.push(muted(ev.regions.join(' · ')));
+        if (ev.confidence != null) lines.push(muted(`${Math.round(ev.confidence*100)}% confidence`));
+        if (ev.sub_questions?.length) {
+          lines.push(`<div style="margin-top:3px;display:flex;gap:3px;flex-wrap:wrap;">${ev.sub_questions.map(t=>chip(String(t).replace(/_/g,' '),'#6366f1')).join('')}</div>`);
+        }
+        if (ev.clarifying) lines.push(`<div style="margin-top:3px;">${warn(ev.clarifying)}</div>`);
+
+      } else if (ev.step === 'SCATTER_GATHER') {
+        // Per-region price table when multiple regions gathered
+        if (ev.region_prices && Object.keys(ev.region_prices).length > 0) {
+          const priceChips = Object.entries(ev.region_prices)
+            .sort((a,b) => a[0].localeCompare(b[0]))
+            .map(([r,p]) => {
+              const ts = ev.region_intervals?.[r] ? ` title="${esc(ev.region_intervals[r])}"` : '';
+              return `<span class="dp-region-chip"${ts}>${esc(r)}<span class="dp-region-price">$${p}</span></span>`;
+            })
+            .join('');
+          lines.push(`<div style="margin-bottom:4px;display:flex;flex-wrap:wrap;gap:3px;">${priceChips}</div>`);
+        } else if (ev.dispatch_price != null) {
+          lines.push(chip(`$${ev.dispatch_price}/MWh`, '#f59e0b'));
+        }
+        if (ev.dispatch_interval) {
+          const ts = ev.dispatch_interval.replace('T',' ').slice(0,19) + ' UTC';
+          const srcUrl = ev.dispatch_source_url || '#';
+          lines.push(`<div style="margin-top:2px;font-size:10px;color:var(--text-muted);">interval: ${esc(ts)} · <a href="${esc(srcUrl)}" target="_blank" style="color:var(--text-muted);text-decoration:underline;font-size:10px;">NEMWEB DISPATCHIS</a></div>`);
+        }
+        if (ev.sources?.length) lines.push(muted(ev.sources.join(' · ')));
+        if (ev.analog_count) lines.push(muted(`${ev.analog_count} analogs matched`));
+
+      } else if (ev.step === 'EVIDENCE_ASSEMBLED') {
+        if (ev.temporal_docs) lines.push(muted(`${ev.temporal_docs} TemporalRAG docs`));
+        if (ev.fuel_sources) lines.push(muted(`${ev.fuel_sources} fuel sources`));
+        if (ev.analogs_matched) lines.push(muted(`${ev.analogs_matched} analogs`));
+        if (ev.driver_events) lines.push(muted(`${ev.driver_events} driver events`));
+        if (ev.binding_constraints) lines.push(chip(`${ev.binding_constraints} binding constraints`, '#f97316'));
+        if (ev.fuel_dispatch_mw && Object.keys(ev.fuel_dispatch_mw).length > 0) {
+          const fuelList = Object.entries(ev.fuel_dispatch_mw)
+            .sort((a,b) => b[1]-a[1])
+            .slice(0,5)
+            .map(([f,mw]) => `<span style="font-size:10px;color:var(--text-secondary);">${esc(f)}: <b>${mw}MW</b></span>`)
+            .join('  ');
+          lines.push(`<div style="margin-top:3px;display:flex;flex-wrap:wrap;gap:6px;">${fuelList}</div>`);
+        }
+        if (ev.hist_dist) lines.push(muted(`hist: median $${ev.hist_dist.median}/MWh (n=${ev.hist_dist.n_rows})`));
+        // Show LNN status from evidence_quality
+        const lnn = resp?.evidence_quality?.models?.lnn;
+        if (lnn === false || lnn === null || lnn === undefined) {
+          lines.push(`<div style="margin-top:3px;">${warn('LNN unavailable - see model status pill for reason')}</div>`);
+        }
+      } else if (ev.step === 'VERDICT') {
+        const vColor = {SUPPORTED:'#22c55e',LOW_CONFIDENCE:'#f59e0b',INSUFFICIENT_DATA:'#f97316',OUT_OF_SCOPE:'#6b7280'}[ev.verdict] || '#ef4444';
+        if (ev.verdict) lines.push(chip(ev.verdict.replace(/_/g,' '), vColor));
+        if (ev.action) lines.push(chip(ev.action.toUpperCase(), '#6366f1'));
+        if (ev.confidence != null) lines.push(muted(`${Math.round(ev.confidence*100)}% confidence`));
+        if (ev.band) lines.push(muted(ev.band));
+
+      } else if (ev.step === 'ANSWER_PLAN') {
+        if (ev.planner) lines.push(chip(ev.planner.replace(/_/g,' '), '#3b82f6'));
+        if (ev.claim_findings != null) {
+          const col = ev.claim_findings > 0 ? '#22c55e' : '#6b7280';
+          lines.push(`<span style="color:${col};font-size:11px;">${ev.claim_findings} claim(s) verified</span>`);
+        }
+        if (ev.re_routed) lines.push(warn(`re-routed to: ${ev.suggested_planner || '?'}`));
+
+      } else if (ev.step === 'COVERAGE_AUDIT') {
+        lines.push(ev.re_routed ? warn(`re-routed → ${ev.suggested_planner}`) : ok('no re-route needed'));
+
+      } else if (ev.step === 'COMPLETE') {
+        lines.push(ok(`total ${ev.t_ms}ms`));
+      }
+
+      return lines.join(' ');
+    },
+
     _mapViewportType(type) {
       return {
         verdict: 'answer',
@@ -833,12 +963,12 @@ export function gridverdictApp() {
       if (!verdict) return '';
       const sections = verdict.answer_sections || [];
       if (!sections.length) return verdict.why_plain_english || '';
-      const preferred = ['Answer', 'Drivers', 'Continuation'];
+      const preferred = ['Regional Comparison', 'Answer', 'Drivers', 'Continuation'];
       const lines = [];
       for (const title of preferred) {
         const section = sections.find(s => s.title === title);
         if (!section || !Array.isArray(section.items)) continue;
-        const limit = title === 'Answer' ? 2 : 1;
+        const limit = title === 'Regional Comparison' ? 4 : title === 'Answer' ? 3 : 1;
         for (const item of section.items.slice(0, limit)) {
           if (item) lines.push(item);
         }

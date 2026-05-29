@@ -158,8 +158,11 @@ class LTCTrainer:
             import torch
             import torch.optim as optim
         except ImportError:
-            logger.warning("torch not available — LNN training skipped")
-            return None
+            raise RuntimeError(
+                "torch is not installed — LNN cannot train. "
+                "Add torch to the ml extras and rebuild the image: "
+                "`pip install torch --index-url https://download.pytorch.org/whl/cpu`"
+            )
 
         from app.engines.lnn.ltc_model import LTCModel
         from app.engines.lnn.distribution import (
@@ -232,6 +235,51 @@ class LTCTrainer:
             for fv in self._buffer[-self.seq_len:]
         ]
         return self.predict(recent)
+
+    def predict_multistep_from_buffer(self, steps: int) -> list[dict[str, float]] | None:
+        """Autoregressive rollout from the internal buffer.
+
+        Each step predicts P10/P50/P90, then feeds P50 back as the next
+        interval's price. TOD features advance by one 5-minute interval per
+        step. Returns None if the model is not trained or buffer is too short.
+        """
+        if len(self._buffer) < 2:
+            return None
+
+        _INTERVAL_RAD = 2.0 * np.pi * 5.0 / (24.0 * 60.0)
+
+        seq: list[np.ndarray] = list(self._buffer[-self.seq_len:])
+        results: list[dict[str, float]] = []
+
+        for step in range(steps):
+            recent = [
+                {"price_rrp": float(fv[0]), "demand_mw": float(fv[1]),
+                 "availability_mw": float(fv[2]), "valid_time": None}
+                for fv in seq[-self.seq_len:]
+            ]
+            pred = self.predict(recent)
+            if pred is None:
+                return results if results else None
+
+            results.append(pred)
+
+            # Build next feature vector: use predicted P50 as price, advance TOD
+            last_fv = seq[-1]
+            p50 = float(pred["p50"])
+            demand = float(last_fv[1])
+            avail = float(last_fv[2])
+            headroom = max(avail - demand, 0.0)
+            tod_sin = float(last_fv[4])
+            tod_cos = float(last_fv[5])
+            angle = np.arctan2(tod_sin, tod_cos)
+            new_angle = angle + _INTERVAL_RAD
+            next_fv = np.array(
+                [p50, demand, avail, headroom, float(np.sin(new_angle)), float(np.cos(new_angle))],
+                dtype=np.float32,
+            )
+            seq = seq[1:] + [next_fv]  # slide the window forward
+
+        return results
 
     def predict(self, recent_intervals: list[dict[str, Any]]) -> dict[str, float] | None:
         """Predict P10/P50/P90 for the next dispatch interval.
@@ -328,7 +376,7 @@ class LTCTrainer:
                 self._head = QuantileHead(meta["hidden_size"]).to(device)
                 self.use_regime_head = False
 
-            ckpt = torch.load(wp, map_location=device)
+            ckpt = torch.load(wp, map_location=device, weights_only=True)
             self._model.load_state_dict(ckpt["model"])
             self._head.load_state_dict(ckpt["head"])
             self._model.eval()

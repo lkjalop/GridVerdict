@@ -20,6 +20,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,12 +57,12 @@ async def write_trace(
         valid_time=valid_time,
         system_time=system_time,
         model_profile=model_profile,
-        source_manifest=source_manifest,
-        tool_calls=tool_calls,
-        decomposition=decomposition,
-        prefill=prefill or {},
-        answer=answer,
-        validator_result=observer_result or {},
+        source_manifest=jsonable_encoder(source_manifest),
+        tool_calls=jsonable_encoder(tool_calls),
+        decomposition=jsonable_encoder(decomposition),
+        prefill=jsonable_encoder(prefill or {}),
+        answer=jsonable_encoder(answer),
+        validator_result=jsonable_encoder(observer_result or {}),
     )
     session.add(trace)
     logger.debug("Trace %s written (valid=%s system=%s)", trace_id, valid_time.isoformat(), system_time.isoformat())
@@ -140,6 +141,7 @@ def to_trace_dict(trace: Trace) -> dict[str, Any]:
         "answer": trace.answer,
         "validator_result": trace.validator_result,
         "tool_calls": trace.tool_calls,
+        "prefill": trace.prefill,
     }
 
 

@@ -186,13 +186,25 @@ async def get_market_forecast(
     from app.mcp.router import call_tool
 
     _ft0 = time.perf_counter()
-    result = await call_tool(
-        "live_quantile_forecast",
-        region=region,
-        lookback_days=lookback_days,
-        horizon_intervals=horizon_intervals,
-    )
-    forecast_latency_ms.observe((time.perf_counter() - _ft0) * 1000)
+    try:
+        result = await call_tool(
+            "live_quantile_forecast",
+            region=region,
+            lookback_days=lookback_days,
+            horizon_intervals=horizon_intervals,
+        )
+    except Exception as exc:
+        logger.warning("Live forecast unavailable for %s: %s", region, exc)
+        result = {
+            "region": region,
+            "available": False,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "reason": str(exc),
+            "forecasts": [],
+            "errors": [{"model": "live_quantile_forecast", "error": str(exc)}],
+        }
+    finally:
+        forecast_latency_ms.observe((time.perf_counter() - _ft0) * 1000)
     if isinstance(result, dict) and result.get("available"):
         await cache.set(f"live_forecast_{region}", result)
     return result

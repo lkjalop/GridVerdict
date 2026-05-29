@@ -76,6 +76,9 @@ class QueryResponse(BaseModel):
     historical_dist: dict | None = None           # historical price distribution (percentiles)
     evidence_quality: dict | None = None          # per-query trust strip summary
     provenance: list[dict] | None = None          # per-source SourceStatus records
+    pipeline_events: list[dict] | None = None     # decision trace timeline steps
+    suggested_questions: list[str] | None = None  # context-aware follow-up chips
+    live_forecast: dict | None = None             # full 48-interval ensemble forecast for chart
 
 
 @router.post("/sessions/{session_id}/query", response_model=QueryResponse)
@@ -95,6 +98,7 @@ async def submit_query(
     query_id = f"qry-{uuid.uuid4().hex[:12]}"
     trace_id = f"trace-{uuid.uuid4().hex[:12]}"
     _t0 = time.perf_counter()
+    _events: list[dict] = [{"step": "QUERY_RECEIVED", "t_ms": 0, "region": body.region, "text_len": len(body.text)}]
 
     # --- 0. Security pass 1 — input hygiene ---
     observer = get_observer()
@@ -109,6 +113,7 @@ async def submit_query(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Input blocked by security observer: {input_check.signals[0].description if input_check.signals else 'risk threshold exceeded'}",
         )
+    _events.append({"step": "SECURITY_INPUT", "t_ms": round((time.perf_counter() - _t0) * 1000), "result": "clean", "signals": len(input_check.signals)})
 
     # Verify session ownership
     from sqlalchemy import select
@@ -130,17 +135,63 @@ async def submit_query(
             detail=f"Unsupported region '{region}'. Valid: {sorted(_VALID_REGIONS)}",
         )
 
+    # --- 0.4. Session rolling context carry-forward (E2) ---
+    # Load last 3 Q&A pairs for short/contextual follow-ups so multi-turn
+    # conversations stay coherent over 5+ exchanges.
+    _enriched_text = body.text
+    _text_lower = body.text.lower().strip()
+    _is_short = len(body.text.split()) <= 12
+    _REGION_CODES = {"nsw1", "vic1", "qld1", "sa1", "tas1", "nsw", "vic", "qld", "sa", "tas"}
+    _CONTEXT_STARTS = (
+        "and ", "what about", "how about", "show me", "tell me",
+        "also ", "instead", "rather", "compare",
+    )
+    _CONTEXT_WORDS = {
+        "it", "that", "this", "there", "those", "same", "rather",
+        "instead", "also", "other", "now", "currently",
+    }
+    _is_contextual = _is_short and (
+        any(w in _text_lower for w in _CONTEXT_WORDS)
+        or any(_text_lower.startswith(p) for p in _CONTEXT_STARTS)
+        or any(r in _text_lower for r in _REGION_CODES)
+        or (_text_lower.endswith("?") and len(body.text.split()) <= 6)
+    )
+    if _is_contextual:
+        try:
+            _prior_rows = (await db.execute(
+                select(QueryModel)
+                .where(QueryModel.session_id == session_id, QueryModel.tenant_id == user.tenant_id)
+                .order_by(QueryModel.created_at.desc())
+                .limit(3)
+            )).scalars().all()
+            if _prior_rows:
+                _ctx_parts = [
+                    f"Q{i+1}: {q.raw_query}"
+                    for i, q in enumerate(reversed(_prior_rows))
+                    if q.raw_query
+                ]
+                if _ctx_parts:
+                    _enriched_text = (
+                        f"[Session context: {'; '.join(_ctx_parts)}] "
+                        f"[Current question]: {body.text}"
+                    )
+                    logger.debug(
+                        "Session context applied: %d prior queries enriched", len(_ctx_parts)
+                    )
+        except Exception as _ctx_err:
+            logger.debug("Session context lookup failed (non-fatal): %s", _ctx_err)
+
     # --- 0.5. Query restatement — extract sub-questions before decompose ---
     # Uses qwen3:14b /no_think (~1s). Falls back silently to empty result.
-    restatement = await restate_query(body.text)
+    restatement = await restate_query(_enriched_text)
     # Seed sub-questions into the decomposer text so it produces better
     # causal_targets and requested_output for multi-part queries.
-    _decompose_text = restatement.seed_text(body.text)
+    _decompose_text = restatement.seed_text(_enriched_text)
 
     # --- 1. Decompose (rules-first hybrid: rules → LLM enrichment → merge) ---
     _decomp_t0 = time.perf_counter()
     decomp = await llm_decompose(_decompose_text, region_hint=region, query_id=query_id)
-    # Restore raw_query to original user text (not the seeded version).
+    # Restore raw_query to original user text (not enriched/seeded version).
     if _decompose_text != body.text:
         decomp = decomp.model_copy(update={"raw_query": body.text})
     # Always populate sub_questions from the deterministic classifier if the
@@ -151,6 +202,16 @@ async def submit_query(
         if _sq:
             decomp = decomp.model_copy(update={"sub_questions": _sq})
     llm_decompose_latency_ms.observe((time.perf_counter() - _decomp_t0) * 1000)
+    _events.append({
+        "step": "DECOMPOSE",
+        "t_ms": round((time.perf_counter() - _t0) * 1000),
+        "intent": decomp.intent.value,
+        "regions": decomp.entities.get("regions", []),
+        "requested_output": decomp.requested_output or "",
+        "confidence": round(decomp.confidence, 2),
+        "sub_questions": [sq.get("type") for sq in (decomp.sub_questions or [])],
+        **({"clarifying": decomp.clarifying_question} if decomp.clarifying_question else {}),
+    })
 
     # --- 1b. Security pass 2 — decomposition intent check ---
     decomp_check = observer.pass_decomposition(decomp.model_dump())
@@ -169,7 +230,7 @@ async def submit_query(
     # Comparison intent: gather multiple regions concurrently
     season_buckets = decomp.time_range.get("season_buckets") if decomp.time_range else None
     from app.mcp.weather_client import weather_query_relevant
-    include_weather = weather_query_relevant(body.text)
+    include_weather = weather_query_relevant(body.text, region=region)
     # Sprint Q: include pre-computed commentary events for queries needing historical context
     include_commentary = decomp.requires_history or decomp.requires_why or decomp.intent in (
         IntentLabel.RETROSPECTIVE, IntentLabel.EXPLANATION,
@@ -189,12 +250,67 @@ async def submit_query(
             observer=observer,
         )
 
+    # --- 2a. Historical routing (BKL-006 + BKL-013) ---
+    # When the query is RETROSPECTIVE with a resolvable past anchor, route to the
+    # archive DB rather than the live NEMWeb feed.  For multi-hop queries
+    # (historical + forecast), run both and merge.
+    _hist_anchor: "datetime | None" = None
+    _try_historical = (
+        decomp.intent == IntentLabel.RETROSPECTIVE
+        or (decomp.requires_history and decomp.intent == IntentLabel.EXPLANATION)
+    )
+    if _try_historical:
+        try:
+            from app.engines.temporal_utils import resolve_time_anchor
+            _time_range = decomp.time_range or {}
+            _from_off = (
+                _time_range.get("from_offset") or _time_range.get("from")
+                if isinstance(_time_range, dict) else None
+            )
+            _hist_anchor = resolve_time_anchor(
+                from_offset=_from_off,
+                raw_query=body.text,
+                now=datetime.now(timezone.utc),
+            )
+        except Exception as _ta_err:
+            logger.debug("Historical anchor resolution failed (non-fatal): %s", _ta_err)
+
     comparison_gathers: dict[str, GatherResult] = {}
-    if decomp.intent == IntentLabel.COMPARISON:
-        comparison_regions = list({
-            r.upper() for r in (decomp.entities.get("regions") or [region])
-            if r.upper() in {"NSW1", "VIC1", "QLD1", "SA1", "TAS1"}
-        }) or [region]
+    _decomp_regions = [
+        r.upper() for r in (decomp.entities.get("regions") or [])
+        if r.upper() in {"NSW1", "VIC1", "QLD1", "SA1", "TAS1"}
+    ]
+    # Run multi-region gather whenever the decomposer detected multiple regions
+    # (covers COMPARISON intent AND queries like "how does NSW differ to other states?")
+    _multi_region_query = decomp.intent == IntentLabel.COMPARISON or len(_decomp_regions) > 1
+
+    if _hist_anchor is not None and not _multi_region_query:
+        # Historical gather: pull evidence from DB archive at anchor_time
+        from app.agents.scatter_gather import scatter_gather_historical, _merge_historical_and_live
+        gather = await scatter_gather_historical(region, _hist_anchor, db)
+
+        # Multi-hop: also run a live gather for the forecast half of the query
+        if decomp.requires_forecast and gather.dispatch is not None:
+            try:
+                import asyncio as _aio
+                _live = await _aio.wait_for(
+                    scatter_gather(region, client, cache, include_weather=False),
+                    timeout=8.0,
+                )
+                gather = _merge_historical_and_live(gather, _live)
+            except Exception as _live_err:
+                logger.debug("Multi-hop live gather failed (non-fatal): %s", _live_err)
+
+        if gather.dispatch is None:
+            # No archive data found — downgrade to insufficient data, don't run live gather
+            # (the answer planner will explain the gap via _build_confidence_gap_explanation)
+            logger.info(
+                "Historical gather returned no dispatch data for %s @ %s — no archive rows",
+                region, _hist_anchor.isoformat(),
+            )
+
+    elif _multi_region_query:
+        comparison_regions = list(dict.fromkeys(_decomp_regions)) or [region]
         import asyncio as _asyncio
         results = await _asyncio.gather(
             *(scatter_gather(r, client, cache, include_weather=include_weather) for r in comparison_regions),
@@ -217,6 +333,34 @@ async def submit_query(
             include_weather=include_weather,
             include_commentary=include_commentary,
         )
+
+    _sg_sources: list[str] = []
+    if gather.dispatch: _sg_sources.append("AEMO_DISPATCH")
+    if gather.analogs: _sg_sources.append(f"ANALOGS×{len(gather.analogs)}")
+    if gather.notices: _sg_sources.append(f"NOTICES×{len(gather.notices)}")
+    if gather.weather: _sg_sources.append("WEATHER")
+    if comparison_gathers: _sg_sources.append(f"COMPARISON×{len(comparison_gathers)}")
+    _dispatch_ts = gather.dispatch.valid_time.isoformat() if gather.dispatch else None
+    _events.append({
+        "step": "SCATTER_GATHER",
+        "t_ms": round((time.perf_counter() - _t0) * 1000),
+        "sources": _sg_sources,
+        "dispatch_price": round(gather.dispatch.price_rrp, 2) if gather.dispatch else None,
+        "dispatch_interval": _dispatch_ts,
+        "dispatch_source_url": "https://nemweb.com.au/Reports/Current/DispatchIS_Reports/",
+        "analog_count": len(gather.analogs) if gather.analogs else 0,
+        "dispatch_fresh": gather.dispatch_fresh if hasattr(gather, "dispatch_fresh") else None,
+        "region_prices": {
+            r: round(g.dispatch.price_rrp, 2)
+            for r, g in comparison_gathers.items()
+            if g.dispatch
+        } if comparison_gathers else None,
+        "region_intervals": {
+            r: g.dispatch.valid_time.isoformat()
+            for r, g in comparison_gathers.items()
+            if g.dispatch
+        } if comparison_gathers else None,
+    })
 
     if gather.dispatch:
         gather.recent_dispatch = await _load_recent_dispatch_context(db, region, gather.dispatch.valid_time)
@@ -293,7 +437,14 @@ async def submit_query(
         sq.get("type") == "historical_price_distribution"
         for sq in (decomp.sub_questions or [])
     )
-    if _has_hist_sq or decomp.requires_history:
+    # Run historical distribution for any live-market query (not just explicit historical questions)
+    # so the answer can always say "this is cheap/normal/elevated vs last year"
+    _wants_hist = (
+        _has_hist_sq
+        or decomp.requires_history
+        or decomp.intent.value in ("lookup", "explanation", "comparison", "action_recommendation")
+    )
+    if _wants_hist:
         try:
             from app.engines.historical_price import get_historical_price_distribution
             _anchor = gather.dispatch.valid_time if gather.dispatch else datetime.now(timezone.utc)
@@ -307,6 +458,35 @@ async def submit_query(
             )
         except Exception as exc:
             logger.debug("Historical price distribution unavailable (non-fatal): %s", exc)
+
+    # Summarise fuel dispatch by type for the evidence event
+    _fuel_by_type: dict[str, float] = {}
+    if gather.unit_events:
+        for ue in gather.unit_events:
+            fuel = getattr(ue, "fuel_type", None) or "unknown"
+            mw = float(getattr(ue, "total_cleared_mw", 0) or 0)
+            _fuel_by_type[fuel] = round(_fuel_by_type.get(fuel, 0) + mw, 1)
+    _binding_constraints = sum(
+        1 for d in gather.driver_events
+        if getattr(d, "constraint_id", None)
+    ) if gather.driver_events else 0
+    _ev_assembled: dict = {
+        "step": "EVIDENCE_ASSEMBLED",
+        "t_ms": round((time.perf_counter() - _t0) * 1000),
+        "temporal_docs": len(temporal_evidence),
+        "fuel_sources": len((fuel_mix or {}).get("sources", [])),
+        "fuel_dispatch_mw": _fuel_by_type or None,
+        "binding_constraints": _binding_constraints or None,
+        "analogs_matched": len(gather.analogs) if gather.analogs else 0,
+        "driver_events": len(gather.driver_events) if gather.driver_events else 0,
+    }
+    if hist_dist and hist_dist.get("available"):
+        _ev_assembled["hist_dist"] = {
+            "period": hist_dist.get("period_label"),
+            "median": round(hist_dist.get("median", 0), 2),
+            "n_rows": hist_dist.get("count"),
+        }
+    _events.append(_ev_assembled)
 
     # --- 2e. Security pass 3 — tool output hygiene ---
     tool_outputs = []
@@ -362,6 +542,14 @@ async def submit_query(
     )
     why_output = build_why(why_sources)
     factual = format_verdict(why_output, why_sources, trace_id)
+    _events.append({
+        "step": "VERDICT",
+        "t_ms": round((time.perf_counter() - _t0) * 1000),
+        "verdict": factual.verdict.value,
+        "action": factual.action.value if factual.action else None,
+        "confidence": round(factual.confidence, 2),
+        "band": factual.confidence_band.value if factual.confidence_band else None,
+    })
 
     # --- 4. Claim Verifier — answer guard ---
     _cv_result = verify_answer(factual)
@@ -382,6 +570,12 @@ async def submit_query(
         )
     except Exception as exc:
         logger.debug("Answer planner unavailable for %s: %s", query_id, exc)
+    _events.append({
+        "step": "ANSWER_PLAN",
+        "t_ms": round((time.perf_counter() - _t0) * 1000),
+        "planner": decomp.requested_output or "current_market_state",
+        "claim_findings": len(_cv_result.findings),
+    })
     if _cv_result.findings:
         logger.debug(
             "Claim verifier %s: %d finding(s) %s",
@@ -429,6 +623,56 @@ async def submit_query(
                 decomp = _patched_decomp
             except Exception as exc:
                 logger.debug("Critic re-plan failed (non-fatal, keeping original): %s", exc)
+        _events.append({
+            "step": "COVERAGE_AUDIT",
+            "t_ms": round((time.perf_counter() - _t0) * 1000),
+            "re_routed": audit.has_actionable_suggestion(),
+            "original_planner": decomp.requested_output,
+            "suggested_planner": audit.suggested_output if audit.has_actionable_suggestion() else None,
+        })
+
+    # --- 5.5. Inject cross-region comparison narrative ---
+    if comparison_gathers and len(comparison_gathers) > 1:
+        _region_rows = sorted(
+            [(r, g.dispatch.price_rrp) for r, g in comparison_gathers.items() if g.dispatch],
+            key=lambda x: x[1],
+        )
+        if _region_rows:
+            _cheapest_r, _cheapest_p = _region_rows[0]
+            _priciest_r, _priciest_p = _region_rows[-1]
+            _price_list = "  ·  ".join(
+                f"{r} ${p:.0f}/MWh" for r, p in sorted(_region_rows, key=lambda x: x[0])
+            )
+            _comparison_para = (
+                f"Cross-region snapshot: {_price_list}. "
+                f"Cheapest: {_cheapest_r} at ${_cheapest_p:.0f}/MWh. "
+                f"Priciest: {_priciest_r} at ${_priciest_p:.0f}/MWh. "
+                f"Spread: ${(_priciest_p - _cheapest_p):.0f}/MWh."
+            )
+            factual = factual.model_copy(update={
+                "why_plain_english": factual.why_plain_english + "\n\n" + _comparison_para
+            })
+            # Also inject as a dedicated answer section
+            _existing = list(factual.answer_sections or [])
+            _existing.insert(0, {
+                "title": "Regional Comparison",
+                "items": [
+                    f"{r}: ${p:.2f}/MWh" for r, p in sorted(_region_rows, key=lambda x: x[0])
+                ] + [
+                    f"Spread {_cheapest_r}→{_priciest_r}: ${(_priciest_p - _cheapest_p):.0f}/MWh"
+                ],
+            })
+            factual = factual.model_copy(update={"answer_sections": _existing})
+
+    # --- 5.8. Confidence gap explainer — inject when LOW_CONFIDENCE or INSUFFICIENT_DATA ---
+    if factual.verdict.value in ("LOW_CONFIDENCE", "INSUFFICIENT_DATA") and factual.confidence < 0.75:
+        _gap_lines = _build_confidence_gap_explanation(factual, evidence_quality, gather)
+        if _gap_lines:
+            _existing_secs = list(factual.answer_sections or [])
+            # Remove any existing "Missing" section and replace with gap explainer
+            _existing_secs = [s for s in _existing_secs if s.get("title") != "Why low confidence"]
+            _existing_secs.append({"title": "Why low confidence", "items": _gap_lines})
+            factual = factual.model_copy(update={"answer_sections": _existing_secs})
 
     # --- 6. Security pass 4 — answer hygiene ---
     answer_check = observer.pass_answer(factual.model_dump(mode="json"))
@@ -449,6 +693,12 @@ async def submit_query(
             counterargument="Security observer blocked this response.",
             trace_id=trace_id,
         )
+    _events.append({
+        "step": "SECURITY_OUTPUT",
+        "t_ms": round((time.perf_counter() - _t0) * 1000),
+        "result": "blocked" if answer_check.should_halt() else "clean",
+        "signals": len(answer_check.signals),
+    })
 
     # --- 7. Persist query + trace ---
     answer_dict = factual.model_dump(mode="json")
@@ -460,7 +710,7 @@ async def submit_query(
         tenant_id=user.tenant_id,
         session_id=session_id,
         raw_query=body.text,
-        decomposition=decomp.model_dump(),
+        decomposition=decomp.model_dump(mode="json"),
         answer=answer_dict,
         trace_id=trace_id,
         intent=decomp.intent.value,
@@ -469,16 +719,18 @@ async def submit_query(
     )
     db.add(query_row)
 
+    _events.append({"step": "COMPLETE", "t_ms": round((time.perf_counter() - _t0) * 1000)})
     await write_trace(
         session=db,
         trace_id=trace_id,
         tenant_id=user.tenant_id,
         query_id=query_id,
         valid_time=valid_time,
-        decomposition=decomp.model_dump(),
+        decomposition=decomp.model_dump(mode="json"),
         tool_calls=tool_calls_log,
         answer=answer_dict,
         observer_result=answer_check.to_dict(),
+        prefill={"pipeline_events": _events},
     )
 
     await db.flush()
@@ -509,13 +761,18 @@ async def submit_query(
         comparison_table = rows if rows else None
 
     query_latency_ms.observe((time.perf_counter() - _t0) * 1000)
-    _decomp_dict = decomp.model_dump()
+    _decomp_dict = decomp.model_dump(mode="json")
+    _decomp_dict["trace_id"] = trace_id
     if not restatement.is_empty():
         _decomp_dict["restatement"] = {
             "sub_questions": restatement.sub_questions,
             "primary_intent": restatement.primary_intent,
             "answer_gap_risk": restatement.answer_gap_risk,
         }
+
+    # Generate context-aware follow-up question chips
+    _suggested = _generate_followup_questions(decomp, factual, region, gather, hist_dist)
+
     return QueryResponse(
         query_id=query_id,
         session_id=session_id,
@@ -532,6 +789,9 @@ async def submit_query(
         historical_dist=hist_dist,
         evidence_quality=evidence_quality,
         provenance=provenance,
+        pipeline_events=_events,
+        suggested_questions=_suggested or None,
+        live_forecast=gather.live_forecast if gather.live_forecast and gather.live_forecast.get("available") else None,
     )
 
 
@@ -587,7 +847,7 @@ async def _submit_seasonal_query(
         tenant_id=user.tenant_id,
         session_id=session_id,
         raw_query=body.text,
-        decomposition=decomp.model_dump(),
+        decomposition=decomp.model_dump(mode="json"),
         answer=answer_dict,
         trace_id=trace_id,
         intent=decomp.intent.value,
@@ -600,7 +860,7 @@ async def _submit_seasonal_query(
         tenant_id=user.tenant_id,
         query_id=query_id,
         valid_time=datetime.now(timezone.utc),
-        decomposition=decomp.model_dump(),
+        decomposition=decomp.model_dump(mode="json"),
         tool_calls=[{"source": "AEMO_ARCHIVE_DISPATCH_PRICE", "seasonal_summary": seasonal_summary}],
         answer=answer_dict,
         observer_result=answer_check.to_dict(),
@@ -613,7 +873,7 @@ async def _submit_seasonal_query(
         session_id=session_id,
         intent=decomp.intent.value,
         verdict=factual,
-        decomposition=decomp.model_dump(),
+        decomposition=decomp.model_dump(mode="json"),
         viewport_type="retrospective",
         comparison_table=None,
         seasonal_summary=seasonal_summary,
@@ -748,3 +1008,285 @@ def _build_evidence_quality(gather, temporal_evidence: list, fuel_mix, why_sourc
         "rebids": {"status": "not_ingested"},
         "source_coverage": why_sources.source_coverage,
     }
+
+
+def _generate_followup_questions(
+    decomp: "QueryDecomposition",
+    factual: "FactualVerdict",
+    region: str,
+    gather: "GatherResult",
+    hist_dist: dict | None,
+) -> list[str]:
+    """Deterministically generate 3 context-aware follow-up question chips.
+
+    Based on the current intent, verdict, and evidence gaps — no LLM call.
+    """
+    questions: list[str] = []
+    intent = decomp.intent.value
+    verdict = factual.verdict.value if factual.verdict else "UNKNOWN"
+    price = gather.dispatch.price_rrp if gather.dispatch else None
+    regime = gather.dispatch_regime if hasattr(gather, "dispatch_regime") else None
+
+    # Q1: Drill into the reason for current conditions
+    if intent in ("lookup", "comparison"):
+        questions.append(f"Why is {region} at this price right now?")
+    elif intent == "explanation":
+        questions.append(f"How long will {region} stay elevated?")
+    elif intent in ("action_recommendation", "fuel_source_recommendation"):
+        questions.append(f"What is the current {region} spot price?")
+
+    # Q2: Forward-looking / forecast
+    if price and price > 200:
+        questions.append(f"Will {region} price drop below $200 in the next hour?")
+    elif price and price < 100:
+        questions.append(f"Is {region} cheap compared to last year?")
+    else:
+        questions.append(f"What is the {region} price forecast for the next 30 minutes?")
+
+    # Q3: Evidence gap or cross-region
+    missing = [m for s in (factual.answer_sections or []) if s.get("title") == "Missing"
+               for m in s.get("items", [])]
+    if missing:
+        gap = missing[0].replace("_", " ")
+        questions.append(f"Why is {gap} missing and does it matter?")
+    elif intent == "comparison":
+        questions.append("Which state has the cheapest energy to buy right now?")
+    elif hist_dist and hist_dist.get("classification") in ("elevated", "high", "spike"):
+        questions.append(f"Is {region} more expensive than usual this time of day?")
+    else:
+        questions.append(f"Compare {region} to all other NEM states now.")
+
+    return questions[:3]
+
+
+def _build_confidence_gap_explanation(
+    factual: "FactualVerdict",
+    evidence_quality: dict | None,
+    gather: "GatherResult",
+) -> list[str]:
+    """Explain specifically WHY confidence is low, and what would resolve it.
+
+    Returns a list of bullet points. Each bullet names the gap, why it matters,
+    and how the system would behave differently if data were available.
+    """
+    lines: list[str] = []
+    eq = evidence_quality or {}
+
+    # Dispatch freshness
+    dispatch_status = eq.get("dispatch", {}).get("status", "unknown")
+    if dispatch_status in ("stale", "offline", "unknown"):
+        lines.append(
+            f"Live dispatch data is {dispatch_status} — price may not reflect current market. "
+            "Fresh dispatch data (<5 min) would raise confidence by ~15%."
+        )
+
+    # Notices
+    notices = eq.get("notices", {})
+    if not notices.get("count"):
+        lines.append(
+            "No AEMO market notices found — cannot confirm generator outages, constraints, "
+            "or market interventions. A notice would narrow the causal explanation."
+        )
+
+    # Constraints
+    constraints = eq.get("constraints", {})
+    if not constraints.get("count"):
+        lines.append(
+            "Binding constraint data unavailable for this interval (archive covers to 2024). "
+            "Constraint violations would shift regime classification and affect confidence."
+        )
+
+    # Models
+    models = eq.get("models", {})
+    if not models.get("lnn"):
+        lines.append(
+            "LNN model is not yet trained — no machine-learning forecast for this region. "
+            "This removes one ensemble member from the confidence calculation."
+        )
+    if not models.get("lear") and not models.get("qra"):
+        lines.append(
+            "LEAR and QRA models unavailable — quantile forecast uncertainty is unquantified. "
+            "These models need dispatch history to calibrate."
+        )
+
+    # Missing data from answer sections
+    missing_items = [
+        m for s in (factual.answer_sections or [])
+        if s.get("title") == "Missing"
+        for m in s.get("items", [])
+    ]
+    for item in missing_items[:2]:
+        lines.append(f"Missing: {item} — ingesting this would provide additional causal evidence.")
+
+    if not lines:
+        lines.append(
+            f"Confidence is {round(factual.confidence * 100)}% due to limited corroborating evidence "
+            "across the required data sources. Adding dispatch constraints and live market notices "
+            "would improve confidence."
+        )
+
+    return lines[:5]
+
+
+# ── BKL-027: Answer export endpoint ──────────────────────────────────────────
+
+@router.get("/query/{query_id}/export")
+async def export_query_analysis(
+    query_id: str,
+    format: str = "markdown",
+    user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export a query analysis as a formatted markdown report or JSON.
+
+    Suitable for inclusion in regulatory submissions, board reports,
+    and market analysis documentation. Includes full evidence table,
+    claim map, and model provenance.
+    """
+    from fastapi.responses import Response
+    row = (await db.execute(
+        select(QueryModel)
+        .where(QueryModel.id == query_id, QueryModel.tenant_id == user.tenant_id)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Query not found")
+
+    if format == "json":
+        return {
+            "query_id": row.id,
+            "raw_query": row.raw_query,
+            "region": row.region,
+            "intent": row.intent,
+            "verdict": row.verdict,
+            "answer": row.answer,
+            "decomposition": row.decomposition,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+
+    md = _build_markdown_export(row)
+    return Response(content=md, media_type="text/markdown",
+                    headers={"Content-Disposition": f'attachment; filename="gridverdict_{query_id}.md"'})
+
+
+def _build_markdown_export(row: "QueryModel") -> str:
+    """Build a self-contained markdown report from a stored query row."""
+    answer = row.answer or {}
+    sections = answer.get("answer_sections") or []
+    evidence_refs = answer.get("evidence_refs") or answer.get("evidence_manifest") or []
+    claim_map = answer.get("claim_map") or []
+    confidence = answer.get("confidence", 0)
+    verdict = answer.get("verdict", {}).get("value", row.verdict or "UNKNOWN") if isinstance(answer.get("verdict"), dict) else (row.verdict or "UNKNOWN")
+    why_text = answer.get("why_plain_english", "")
+
+    ts = row.created_at.strftime("%Y-%m-%d %H:%M AEST") if row.created_at else "Unknown"
+
+    lines = [
+        "# GridVerdict Market Analysis Report",
+        "",
+        f"**Query:** {row.raw_query}",
+        f"**Date:** {ts}",
+        f"**Region:** {row.region or 'N/A'}",
+        f"**Intent:** {row.intent or 'N/A'}",
+        f"**Verdict:** {verdict}  |  Confidence: {confidence:.0%}",
+        "",
+        "---",
+        "",
+    ]
+
+    if why_text:
+        lines += ["## Analysis", "", why_text, ""]
+
+    for section in sections[:5]:
+        title = section.get("title", "")
+        items = section.get("items") or []
+        if title and items:
+            lines.append(f"## {title}")
+            lines.append("")
+            for item in items[:5]:
+                lines.append(f"- {item}")
+            lines.append("")
+
+    if evidence_refs:
+        lines += ["## Evidence References", "",
+                  "| Source | Interval | Field | Value |",
+                  "|---|---|---|---|"]
+        for ref in evidence_refs[:10]:
+            src = ref.get("source_table", ref.get("source", "—"))
+            interval = ref.get("interval", "—")[:19] if ref.get("interval") else "—"
+            field = ref.get("field", "—")
+            value = str(ref.get("value", ref.get("raw_file_hash", "—")))[:40]
+            lines.append(f"| {src} | {interval} | {field} | {value} |")
+        lines.append("")
+
+    if claim_map:
+        lines += ["## Claim Map", "",
+                  "| Type | Tier | Evidence ID |",
+                  "|---|---|---|"]
+        for claim in claim_map[:8]:
+            ctype = claim.get("claim_type", claim.get("type", "—"))
+            tier = claim.get("driver_tier", claim.get("tier", "—"))
+            ev = claim.get("evidence_ref_id", claim.get("evidence_ref", "—"))
+            lines.append(f"| {ctype} | {tier} | {ev} |")
+        lines.append("")
+
+    lines += [
+        "---",
+        "",
+        "*Generated by GridVerdict. Decision-support only — not financial advice. "
+        "Verify with AEMO evidence before acting. "
+        f"Trace ID: {answer.get('trace_id', 'N/A')}*",
+    ]
+
+    return "\n".join(lines)
+
+
+# ── BKL-028: Session research context helpers ─────────────────────────────────
+
+async def _load_session_findings(session_id: str, cache: "MarketCache") -> list[str]:
+    """Load accumulated research findings for this session (up to 5)."""
+    try:
+        findings = await cache.get(f"session_findings_{session_id}")
+        return findings if isinstance(findings, list) else []
+    except Exception:
+        return []
+
+
+async def _save_session_finding(
+    session_id: str,
+    cache: "MarketCache",
+    factual: "FactualVerdict",
+    region: str,
+    query_text: str,
+) -> None:
+    """Extract and persist the single most important finding from this answer."""
+    try:
+        # Try confirmed/supported claims first
+        finding: str | None = None
+        for claim in (factual.claim_map or []):
+            tier = getattr(claim, "driver_tier", None) or (
+                claim.get("driver_tier") if isinstance(claim, dict) else None
+            )
+            if tier in ("confirmed", "supported"):
+                desc_val = (
+                    claim.get("description") if isinstance(claim, dict)
+                    else getattr(claim, "description", None)
+                )
+                if desc_val:
+                    finding = f"{region}: {str(desc_val)[:100]}"
+                    break
+        if not finding and factual.why_plain_english:
+            # Fall back to first sentence of the answer
+            first = factual.why_plain_english.split(".")[0]
+            if len(first) > 20:
+                finding = first[:120]
+        if not finding:
+            return
+
+        existing = await _load_session_findings(session_id, cache)
+        # Avoid exact duplicates; keep max 5 findings
+        if finding not in existing:
+            existing.append(finding)
+        updated = existing[-5:]
+        await cache.set(f"session_findings_{session_id}", updated)
+    except Exception:
+        pass

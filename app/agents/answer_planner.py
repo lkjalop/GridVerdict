@@ -77,12 +77,147 @@ def plan_answer(
     )
     if requested == "historical_price_distribution" or _has_hist_sq:
         return _plan_historical_distribution(sources, factual, hist_dist or {})
+
+    # Multi-part: compound queries with ≥2 distinct sub-question types get separate sections
+    _sq_types = [sq.get("type") for sq in (sources.decomp.sub_questions or []) if sq.get("type")]
+    if len(set(_sq_types)) >= 2:
+        return _plan_multi_part(sources, factual, fuel_mix=fuel_mix, hist_dist=hist_dist,
+                                analogs=analogs, sq_types=_sq_types)
+
     # requires_forecast is a data signal, not an intent override — keep this one.
     if requested == "causal_explanation_with_forecast" or sources.decomp.requires_forecast:
         return _plan_explanation(sources, factual, include_forecast=True)
     if requested == "causal_explanation":
         return _plan_explanation(sources, factual, include_forecast=False)
-    return _plan_lookup(sources, factual)
+
+    plan = _plan_lookup(sources, factual)
+    # Annotate with threshold answer when user specified a price target
+    thresholds = getattr(sources.decomp, "spike_thresholds", [])
+    if thresholds and sources.current.price_rrp is not None:
+        current = sources.current.price_rrp
+        for t in thresholds[:2]:
+            rel = "above" if current > t else "below"
+            diff = abs(current - t)
+            plan.direct_answer.append(
+                f"vs your threshold of ${t:.0f}/MWh: current ${current:.0f} is "
+                f"{rel} by ${diff:.0f}/MWh."
+            )
+    return plan
+
+
+def _plan_multi_part(
+    sources: WhySources,
+    factual: FactualVerdict,
+    *,
+    fuel_mix: dict[str, Any] | None,
+    hist_dist: dict[str, Any] | None,
+    analogs: list[dict[str, Any]] | None,
+    sq_types: list[str],
+) -> PlannedAnswer:
+    """Build one answer section per detected sub-question type."""
+    c = sources.current
+    f = sources.forecast
+    sections_direct: list[str] = []
+    sections_evidence: list[str] = []
+    sections_missing: list[str] = []
+
+    _seen: set[str] = set()
+    for sq_type in sq_types:
+        if sq_type in _seen:
+            continue
+        _seen.add(sq_type)
+
+        if sq_type == "current_price_reason":
+            sections_direct.append(
+                f"Current price: {c.region} ${c.price_rrp:.2f}/MWh, regime {c.regime}."
+            )
+            if c.demand_mw and c.availability_mw:
+                sections_evidence.append(
+                    f"Demand {c.demand_mw:.0f} MW vs availability {c.availability_mw:.0f} MW "
+                    f"(headroom {max(c.availability_mw - c.demand_mw, 0):.0f} MW)."
+                )
+
+        elif sq_type == "fuel_source_comparison":
+            if fuel_mix and fuel_mix.get("recommendation"):
+                rec = fuel_mix["recommendation"]
+                sections_direct.append(
+                    f"Best source now: {rec.get('fuel_type','?').upper()} — "
+                    f"{rec.get('reason','—')}"
+                )
+                if rec.get("preferred_order"):
+                    sections_evidence.append("Order: " + " > ".join(rec["preferred_order"]))
+            else:
+                sections_missing.append("fuel mix (no live unit dispatch data)")
+
+        elif sq_type == "historical_price_distribution":
+            if hist_dist and hist_dist.get("available"):
+                classification = hist_dist.get("classification", "—")
+                median = hist_dist.get("median", 0)
+                p90 = hist_dist.get("p90", 0)
+                period = hist_dist.get("period_label", "last year")
+                sections_direct.append(
+                    f"vs {period}: current is {classification} "
+                    f"(median ${median:.0f}, P90 ${p90:.0f}/MWh)."
+                )
+            else:
+                sections_missing.append("historical price benchmark")
+
+        elif sq_type in ("forecast_outlook", "price_forecast"):
+            if f and f.available and f.p50 is not None:
+                sections_direct.append(
+                    f"Forecast: {f.direction}, P50 ${f.p50:.0f}/MWh "
+                    f"[P10 ${f.p10:.0f}–P90 ${f.p90:.0f}]."
+                )
+            else:
+                sections_missing.append("price forecast (model initialising)")
+
+        elif sq_type == "regime_change":
+            if analogs:
+                recovered = sum(1 for a in analogs if a.get("outcome") in ("recovered", "normal"))
+                sections_direct.append(
+                    f"Historical analogs: {recovered}/{len(analogs)} similar episodes "
+                    "recovered within 30 min."
+                )
+            else:
+                sections_missing.append("historical analogs")
+
+        elif sq_type == "fcas_opportunity":    # E3: FCAS sub-question template
+            fcas = getattr(sources, "fcas", None)
+            if fcas and fcas.available:
+                if fcas.total_opportunity_mwh is not None:
+                    sections_direct.append(
+                        f"FCAS opportunity: ${fcas.total_opportunity_mwh:.0f}/MWh combined "
+                        f"(best raise: {fcas.best_raise_service} @ ${fcas.max_raise_rrp:.0f}/MWh; "
+                        f"best lower: {fcas.best_lower_service} @ ${fcas.max_lower_rrp:.0f}/MWh)."
+                    )
+                if fcas.tight_markets:
+                    sections_evidence.append(
+                        f"Tight FCAS markets: {', '.join(fcas.tight_markets)} (RRP ≥ $50/MWh)."
+                    )
+            else:
+                sections_missing.append("FCAS prices (not yet populated in DB)")
+
+        elif sq_type == "interconnector_causality":    # E3: interconnector sub-question
+            ic = getattr(sources, "drivers", None)
+            if ic and ic.interconnector_causal_role in ("causal", "contributing"):
+                sections_direct.append(ic.interconnector_narrative)
+                if ic.interconnector_binding_count > 0:
+                    sections_evidence.append(
+                        f"{ic.interconnector_binding_count} interconnector(s) at or near their limits."
+                    )
+            elif ic and ic.tight_interconnectors:
+                sections_evidence.append(
+                    f"{len(ic.tight_interconnectors)} interconnector(s) approaching limits."
+                )
+            else:
+                sections_missing.append("interconnector flow data")
+
+    return PlannedAnswer(
+        headline=f"{c.region} multi-part analysis",
+        direct_answer=sections_direct,
+        key_evidence=sections_evidence,
+        missing=sections_missing,
+    )
 
 
 def apply_plan_to_verdict(factual: FactualVerdict, plan: PlannedAnswer) -> FactualVerdict:
@@ -99,6 +234,23 @@ def _plan_explanation(sources: WhySources, factual: FactualVerdict, *, include_f
     direct = [
         f"{c.region} is ${c.price_rrp:.2f}/MWh with {c.headroom_mw:.0f} MW headroom.",
     ]
+
+    # E5: ChronoGraph regime state — change-point and quantile rank
+    regime_state = getattr(c, "regime_state", None)
+    if regime_state is not None:
+        if float(getattr(regime_state, "signal_strength", 0)) > 0.3:
+            direct.insert(0,
+                f"Regime transition detected: "
+                f"{c.regime.upper()} regime started at this interval "
+                f"(ChronoGraph ADWIN signal strength {regime_state.signal_strength:.2f})."
+            )
+        qr = getattr(regime_state, "quantile_rank", None)
+        if qr is not None and qr > 0.5:
+            direct.append(
+                f"This price sits in the {qr:.0%} percentile of recent observations "
+                f"(ChronoGraph t-digest)."
+            )
+
     trend = _trend_line(sources)
     if trend:
         direct.append(trend)
@@ -411,13 +563,36 @@ def _plan_fuel_source(
 
 def _plan_portfolio_or_action(sources: WhySources, factual: FactualVerdict) -> PlannedAnswer:
     c = sources.current
+    direct = [
+        f"Current market state: ${c.price_rrp:.2f}/MWh, {c.headroom_mw:.0f} MW headroom.",
+        f"Suggested action label: {factual.action.value.replace('_', ' ')}.",
+    ]
+    evidence = [f"Confidence is {factual.confidence:.0%}; check missing-before-action items before acting."]
+
+    # FCAS opportunity context for BESS decisions
+    fcas = sources.fcas
+    if fcas.available:
+        from app.engines.fcas_attribution import fcas_opportunity_summary
+        summary = fcas_opportunity_summary(
+            type("_Ctx", (), {"available": fcas.available, "max_raise_rrp": fcas.max_raise_rrp,
+                              "max_lower_rrp": fcas.max_lower_rrp, "best_raise_service": fcas.best_raise_service,
+                              "best_lower_service": fcas.best_lower_service, "tight_markets": fcas.tight_markets})()
+        )
+        evidence.append(f"FCAS opportunity: {summary}")
+        if fcas.total_opportunity_mwh is not None:
+            evidence.append(
+                f"Combined FCAS opportunity: ${fcas.total_opportunity_mwh:.0f}/MWh "
+                f"(raise + lower services combined)."
+            )
+        if fcas.tight_markets:
+            direct.append(
+                f"Tight FCAS markets: {', '.join(fcas.tight_markets)} — elevated contingency reserve demand."
+            )
+
     return PlannedAnswer(
         headline="Action answer is advisory only.",
-        direct_answer=[
-            f"Current market state: ${c.price_rrp:.2f}/MWh, {c.headroom_mw:.0f} MW headroom.",
-            f"Suggested action label: {factual.action.value.replace('_', ' ')}.",
-        ],
-        key_evidence=[f"Confidence is {factual.confidence:.0%}; check missing-before-action items before acting."],
+        direct_answer=direct,
+        key_evidence=evidence,
         drivers=_driver_lines(sources),
         continuation=_continuation_lines(sources),
         missing=_missing_lines(factual),
@@ -506,12 +681,27 @@ def _plan_historical_distribution(
 
 def _plan_lookup(sources: WhySources, factual: FactualVerdict) -> PlannedAnswer:
     c = sources.current
+    direct = [
+        f"{c.region}: ${c.price_rrp:.2f}/MWh, demand {c.demand_mw:.0f} MW, headroom {c.headroom_mw:.0f} MW.",
+        f"Regime: {c.regime}.",
+    ]
+    # E5: Quantile rank for quick context on whether this price is unusual
+    regime_state = getattr(c, "regime_state", None)
+    if regime_state is not None:
+        qr = getattr(regime_state, "quantile_rank", None)
+        if qr is not None:
+            percentile_label = (
+                "unusually high" if qr >= 0.90 else
+                "above median" if qr >= 0.60 else
+                "near median" if qr >= 0.40 else
+                "below median"
+            )
+            direct.append(
+                f"Price percentile: {qr:.0%} of recent observations — {percentile_label}."
+            )
     return PlannedAnswer(
         headline=f"{c.region} current market state.",
-        direct_answer=[
-            f"{c.region}: ${c.price_rrp:.2f}/MWh, demand {c.demand_mw:.0f} MW, headroom {c.headroom_mw:.0f} MW.",
-            f"Regime: {c.regime}.",
-        ],
+        direct_answer=direct,
         key_evidence=[f"Dispatch interval: {_fmt_time(c.valid_time)}."],
         drivers=[],
         continuation=[],
@@ -706,6 +896,24 @@ def _continuation_lines(sources: WhySources) -> list[str]:
     disabled = [m for m in sources.forecast.model_detail if not m.available and m.model in {"lnn", "tcn"}]
     if disabled:
         lines.append("; ".join(f"{_model_label(m.model)} unavailable: {m.caveat}" for m in disabled[:2]) + ".")
+
+    # Surface LNN spike-risk head probabilities when available
+    _spike_model = next(
+        (m for m in detail if m.model in {"lnn", "lnn_cfc"} and m.spike_probs),
+        None,
+    )
+    if _spike_model and _spike_model.spike_probs:
+        sp = _spike_model.spike_probs
+        _spike_parts = []
+        if sp.get("gt_300") is not None and sp["gt_300"] >= 0.05:
+            _spike_parts.append(f"P(>$300) {sp['gt_300']:.0%}")
+        if sp.get("gt_1000") is not None and sp["gt_1000"] >= 0.02:
+            _spike_parts.append(f"P(>$1000) {sp['gt_1000']:.0%}")
+        if sp.get("lt_0") is not None and sp["lt_0"] >= 0.05:
+            _spike_parts.append(f"P(<$0) {sp['lt_0']:.0%}")
+        if _spike_parts:
+            lines.append("LNN spike-risk: " + ", ".join(_spike_parts) + ".")
+
     return lines
 
 

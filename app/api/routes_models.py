@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.auth import TokenPayload
 from app.api.deps import get_current_user
+from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/models", tags=["models"])
@@ -50,9 +51,22 @@ async def get_model_status(
 
     calibration = await _get_cached_calibration(region)
 
+    try:
+        import torch as _torch
+        _torch_available = True
+        _torch_version = _torch.__version__
+    except ImportError:
+        _torch_available = False
+        _torch_version = None
+
+    settings = get_settings()
+
     return {
         "region": region,
         "as_of": datetime.now(timezone.utc).isoformat(),
+        "torch_available": _torch_available,
+        "torch_version": _torch_version,
+        "sequence_forecasters_enabled": settings.enable_experimental_sequence_forecasters,
         "models": {
             "lnn": lnn_status,
             **forecast_status,
@@ -94,14 +108,41 @@ def _get_lnn_status(region: str) -> dict:
         from datetime import datetime, timezone
         trainer = get_trainer(region)
         if trainer is None or not trainer.is_trained:
-            buffer_count = getattr(trainer, "_buffer_count", None) or getattr(trainer, "buffer_len", None) or 0
-            return {
+            required = int(getattr(trainer, "min_samples", 288) or 288) if trainer else 288
+            price_count = len(getattr(trainer, "_prices", []) or []) if trainer else 0
+            feature_count = len(getattr(trainer, "_buffer", []) or []) if trainer else 0
+            buffer_count = max(price_count, feature_count - 1 if feature_count else 0, 0)
+            try:
+                import torch  # noqa: F401
+                torch_available = True
+            except ImportError:
+                torch_available = False
+            if not trainer:
+                reason = "LNN trainer is unavailable in this runtime."
+            elif not torch_available:
+                reason = (
+                    f"Torch is not installed in this runtime; LNN has "
+                    f"{buffer_count}/{required} target intervals buffered but cannot train."
+                )
+            elif buffer_count < required:
+                reason = (
+                    f"Not yet trained - {buffer_count}/{required} dispatch intervals buffered "
+                    "(288 intervals is about 24 h of 5-minute data)."
+                )
+            else:
+                reason = (
+                    f"Ready to train ({buffer_count} intervals buffered), but no successful "
+                    "LNN checkpoint is available yet."
+                )
+            payload = {
                 "available": False,
                 "model": "lnn",
                 "model_type": "point_forecast",
                 "reason": "Not yet trained — needs 288 dispatch intervals (~24 h of data).",
                 "trained_on_intervals": 0,
                 "buffer_intervals": int(buffer_count),
+                "required_intervals": required,
+                "torch_available": torch_available,
                 "checkpoint_age_hours": None,
                 "notes": (
                     "LNN (Liquid Time-constant Network): single-step deterministic point "
@@ -109,6 +150,8 @@ def _get_lnn_status(region: str) -> dict:
                     "Training runs automatically after 288 intervals are ingested."
                 ),
             }
+            payload["reason"] = reason
+            return payload
         metrics = trainer.last_metrics or {}
         last_trained = trainer.last_trained_at
         checkpoint_age_hours: float | None = None

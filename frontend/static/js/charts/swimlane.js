@@ -36,7 +36,7 @@ const REGIME_THRESHOLDS = {
   TAS1: { elevated:  90, spike: 250, extreme:  800 },
 };
 
-const MAX_POINTS = 36;   // 3 hours at 5-min intervals
+const MAX_POINTS = 48;   // 4 hours of history — matches the 48-interval (4h) forecast horizon
 
 export class SwimLaneChart {
   constructor(domId) {
@@ -79,6 +79,26 @@ export class SwimLaneChart {
   setForecast(forecast) {
     // forecast: null | { times: string[], p10: number[], p50: number[], p90: number[] }
     this._forecast = forecast;
+    // Extract spike risk series from primary model's spike_probs_series
+    this._spikeRisk = null;
+    if (forecast?.forecasts) {
+      const primary = forecast.primary_model;
+      const fc = forecast.forecasts.find(f => f.model === primary) || forecast.forecasts[0];
+      if (fc?.spike_probs_series?.gt_300) {
+        this._spikeRisk = {
+          times: fc.target_times || [],
+          gt_300: fc.spike_probs_series.gt_300,
+          gt_1000: fc.spike_probs_series.gt_1000 || [],
+          lt_0: fc.spike_probs_series.lt_0 || [],
+        };
+      }
+    }
+    this._render();
+  }
+
+  setSpikeRisk(riskData) {
+    // riskData: null | { times: string[], gt_300: number[], gt_1000: number[], lt_0: number[] }
+    this._spikeRisk = riskData;
     this._render();
   }
 
@@ -154,6 +174,7 @@ export class SwimLaneChart {
         {
           type: 'value',
           name: '$/MWh',
+          // NOTE: yAxisIndex 2 = risk % added below dynamically
           nameTextStyle: { color: '#555e78', fontSize: 10 },
           axisLabel: { color: '#555e78', fontSize: 10, formatter: v => `$${v}` },
           axisLine: { show: false },
@@ -173,6 +194,18 @@ export class SwimLaneChart {
           name: 'MW',
           nameTextStyle: { color: '#555e78', fontSize: 10 },
           axisLabel: { color: '#555e78', fontSize: 10, formatter: v => `${v / 1000}k` },
+          axisLine: { show: false },
+          splitLine: { show: false },
+        },
+        {
+          type: 'value',
+          name: 'Risk%',
+          min: 0,
+          max: 100,
+          position: 'right',
+          offset: 40,
+          nameTextStyle: { color: '#f59e0b', fontSize: 9 },
+          axisLabel: { color: '#f59e0b', fontSize: 9, formatter: v => `${v}%` },
           axisLine: { show: false },
           splitLine: { show: false },
         },
@@ -293,6 +326,21 @@ export class SwimLaneChart {
         });
       }
     }
+    // Spike risk overlay — secondary axis (right, 0–100%)
+    if (this._spikeRisk?.gt_300?.length) {
+      const riskTimes = (this._spikeRisk.times || []).map(_formatTime);
+      series.push({
+        name: 'P(>$300)',
+        type: 'line',
+        yAxisIndex: 2,
+        data: riskTimes.map((t, i) => [t, Math.round((this._spikeRisk.gt_300[i] || 0) * 100)]),
+        smooth: true,
+        symbol: 'none',
+        lineStyle: { width: 2, color: '#f59e0b', type: 'dotted' },
+        z: 6,
+      });
+    }
+
     return series;
   }
 
