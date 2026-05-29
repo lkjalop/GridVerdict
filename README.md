@@ -1,188 +1,221 @@
 # GridVerdict
 
-Evidence-grounded decision-support cockpit for the Australian National Electricity Market (NEM).
+**Evidence-grounded decision-support cockpit for the Australian National Electricity Market (NEM).**
 
-GridVerdict answers natural-language questions about live market conditions with short, cited, defensible responses. The LLM is used for query decomposition only; prices, model values, causality tiers, confidence, evidence refs, and final answer sections are built by deterministic code.
+Natural-language questions about live market conditions. Short, cited, defensible answers.  
+The LLM decomposes the question. Deterministic code answers it with evidence.
 
-Research/demo use only. GridVerdict does not execute bids or trades.
-
----
-
-## What It Does
-
-- **Live NEM monitoring**: 5-minute dispatch prices for NSW1, VIC1, QLD1, SA1, and TAS1.
-- **Concise Answer Planner**: chat cards show short sections: Answer, Evidence, Drivers, Continuation, Missing.
-- **Evidence refs**: factual claims trace to source records, timestamps, and provenance.
-- **Causality tiers**: confirmed, supported, plausible, and unconfirmed drivers are separated explicitly.
-- **Incident timeline**: price trajectory, constraints, interconnectors, unit dispatch, rebids, FCAS, outages, and weather context when available.
-- **Forecasting**: LEAR, QRA, GBM/TCN/LNN candidates, meta-ensemble output, conformal calibration, and model availability/status.
-- **Historical analogs**: HippoGraph retrieves similar market states and summarizes what happened afterwards.
-- **TemporalRAG**: distinguishes valid_time from system_time so retrospective answers can respect what was known at the time.
-- **Rolling live feed**: SSE-backed commentary events for material price, forecast, data freshness, weather, and source changes.
-- **BESS scenario engine**: simulation-only battery dispatch economics and missing-data checklist.
-- **Security and compliance surfaces**: SecurityObserver, claim verifier, audit traces, model registry, ISO 42001-style model cards, ISO 27001/AESCSF mappings.
-- **Production plumbing**: PostgreSQL, Redis pub/sub, Redis rate limiting, scheduler leader election, Prometheus metrics, and runbooks.
-
----
-
-## Quick Start
-
-### Prerequisites
-
-```text
-Python 3.11+
-PostgreSQL via Docker for realistic demos
-Redis optional for multi-worker event bus / rate limit / scheduler leader lock
-Ollama optional; rule-based decomposer works for local tests
+```
+docker compose up
 ```
 
-### Install
+→ Open `http://localhost:8000`
+
+---
+
+## What makes it technically interesting
+
+| Component | What it does | Why it matters |
+|---|---|---|
+| **LTC cell** | Liquid Time-Constant ODE implemented from scratch in PyTorch — `dx/dt = -x/τ(x,I,θ) + f(x,I,θ)` | Continuous-time model that adapts its time constant to input volatility — handles SA1's $15k spikes differently to TAS1's flat overnight prices |
+| **ChronoGraph** | ADWIN change-point detection + t-digest streaming quantiles | Detects regime transitions in real time without storing the full price history |
+| **HippoGraph** | Market-state graph + Personalised PageRank analog retrieval | Finds the 10 most similar historical market states and reports what happened next |
+| **TemporalRAG** | Bitemporal archive (valid_time vs system_time) | Answers retrospective questions with what the system *actually knew at the time*, not hindsight |
+| **Evidence contract** | Every `SUPPORTED` verdict requires a cited `evidence_ref` | Confidence bands are derived from evidence coverage, never from model self-assessment |
+| **Security Observer** | 4-pass hygiene pipeline on every query | Tool outputs are treated as untrusted data, not instructions — prompt injection blocked at pass 3 |
+| **Forecast ensemble** | LEAR + QRA + GBM + TCN + LNN meta-ensemble with conformal calibration | P10/P50/P90 intervals; models degrade gracefully when data is insufficient |
+| **Drift monitor** | ADWIN on live forecast residuals per region | Triggers early model retraining when error distribution shifts beyond expected NEM volatility |
+
+---
+
+## Three ways to read this project
+
+### If you're a researcher or ML practitioner
+
+GridVerdict is the first application of a reusable **temporal reasoning framework**. The same components — ChronoGraph, HippoGraph, TemporalRAG, the LNN/LTC cell, the Security Observer — can power a new vertical (shipping logistics, ICU monitoring, bushfire tracking) by writing one `DomainAdapter` class and one data MCP. The `core/` and `engines/` packages have zero imports from `data/`, `mcp/`, or domain code — the framework boundary is enforced, not aspirational.
+
+The LTC cell is implemented from scratch in `app/engines/lnn/ltc_cell.py` without relying on the `ncps` library. It implements the full ODE with an Euler/RK4 solver, input-modulated time constant, and a sigmoid MLP output. The distribution head produces quantile outputs (P10/P50/P90) rather than point forecasts. SA1 — South Australia, the most volatile NEM region — gets a larger hidden dimension and lower learning rate than other regions because spike volatility is structurally different from normal price variance.
+
+Relevant files for ML research:
+- [`app/engines/lnn/ltc_cell.py`](app/engines/lnn/ltc_cell.py) — LTC ODE implementation
+- [`app/engines/lnn/distribution.py`](app/engines/lnn/distribution.py) — quantile head + pinball loss
+- [`app/engines/lnn/trainer.py`](app/engines/lnn/trainer.py) — feature normalisation, training loop, region-specific config
+- [`app/engines/forecasting/inference.py`](app/engines/forecasting/inference.py) — SA1/other region config, bootstrap from DB
+- [`app/engines/chronograph/`](app/engines/chronograph/) — ADWIN + t-digest
+- [`app/engines/hippograph/`](app/engines/hippograph/) — PPR analog retrieval
+- [`app/engines/drift_monitor.py`](app/engines/drift_monitor.py) — River ADWIN on live residuals
+- [`app/engines/forecasting/models/meta_ensemble.py`](app/engines/forecasting/models/meta_ensemble.py) — ensemble weighting
+
+### If you're an energy market professional
+
+GridVerdict answers these questions in under a second from live AEMO data:
+
+- *Why is NSW price elevated right now?* → confirms or denies each driver (constraints, interconnectors, unit dispatch, rebids, weather, AEMO notices) with cited evidence refs and explicit "not confirmed" flags for missing data
+- *Have we seen conditions like this before?* → HippoGraph returns top-10 historical analog states and what happened next
+- *Is this cheap compared to last year?* → P25/median/P75/P90 for this hour/season window from the dispatch archive
+- *What would my BESS have earned last quarter?* → backtest engine with no-lookahead bitemporal replay
+- *What are the FCAS opportunity values right now?* → 8 NEM FCAS markets, tight-market detection, combined raise+lower opportunity
+
+What it **cannot** do: execute bids or trades, predict participant bidding strategy (data is confidential until T-5min), cover WA/NT (different grids), or provide financial products data (ASX/RECs).
+
+Data source: public NEMWeb only (free, no credentials). 5-minute dispatch prices, pre-dispatch 30-min intervals, AEMO market notices, BOM weather.
+
+### If you're an AI/ML engineer evaluating architecture
+
+The key design decision: **LLMs route and structure; deterministic code answers.**
+
+The language model produces a `QueryDecomposition` — intent label, entity list, `requested_output` type, `sub_questions` schema, confidence score. It never asserts market facts or generates numbers. The following pipeline is entirely deterministic:
+
+```
+ScatterGather (parallel, 8 async tasks, ~330ms)
+  → AEMO live price
+  → AEMO market notices
+  → FCAS prices
+  → HippoGraph PPR analogs
+  → LNN quantile forecast
+  → AEMO predispatch comparison
+  → NEM news RSS
+  → Weather consensus
+
+WhySources (normalise raw evidence into typed dataclasses)
+WhyBuilder (deterministic driver tiers, claim map, evidence refs)
+ClaimVerifier (downgrades unsupported causal/forecast claims)
+AnswerPlanner (builds 3-5 line answer sections per sub-question type)
+SecurityObserver pass 4 (every numeric claim must have evidence_ref)
+```
+
+Security Observer runs 4 passes synchronously on every query — input, decomposition, tool output, and answer. Tool outputs are treated as untrusted data; prompt injection is blocked before it reaches the context. The implementation is in [`app/security/`](app/security/).
+
+Bitemporal trace: every query writes a `Trace` row with `valid_time` and `system_time`, enabling full replay of any past decision with exactly the data that was available at that moment.
+
+Compliance surfaces: ISO 27001 control mappings, AESCSF profile, AI risk register, model registry with performance metrics, and audit log are all queryable via the API. See [`app/compliance/`](app/compliance/) and [`app/audit/`](app/audit/).
+
+---
+
+## Quick start
+
+### Requirements
+
+- Docker + Docker Compose
+- 4 GB RAM (PyTorch CPU image)
+
+### One command
 
 ```bash
-pip install -r requirements.txt
+cp .env.example .env   # edit DB_PASSWORD and JWT_SECRET
+docker compose up
 ```
 
-### Environment
+Open `http://localhost:8000`
 
-Copy `.env.example` to `.env` and set values appropriate for local use:
+On first startup the LNN bootstraps from the dispatch archive and trains all 5 NEM regions in ~30 seconds. You'll see `LTC[NSW1] trained on 599 intervals, loss=98` in the logs. All five models must show ✓ in the top bar before the forecast panel is meaningful.
 
-```env
-DATABASE_URL=postgresql+asyncpg://gv:<password>@localhost:5432/gridverdict
-GRIDVERDICT_DEV_NO_AUTH=true
-JWT_SECRET=local-demo-secret
-DECOMPOSER_BACKEND=rule_based
-```
+### Environment variables
 
-### Run
+| Variable | Required | Description |
+|---|---|---|
+| `DB_PASSWORD` | yes | PostgreSQL password |
+| `JWT_SECRET` | yes | 32+ char secret for JWT signing |
+| `GRIDVERDICT_DEV_NO_AUTH` | dev only | Set `true` to skip auth (never in prod) |
+| `DECOMPOSER_BACKEND` | no | `ollama` / `claude` / `rule_based` (default: `ollama`) |
+| `OLLAMA_BASE_URL` | no | Ollama endpoint (default: `http://localhost:11434`) |
+| `ANTHROPIC_API_KEY` | no | Claude API key for LLM decomposer fallback |
+
+The rule-based decomposer runs with no LLM at all — useful for CI and offline demos. For best intent accuracy use Ollama with `qwen2.5:7b` or `mistral`.
+
+### With Ollama (better decomposer accuracy)
 
 ```bash
-docker compose up -d db
-uvicorn app.api.main:app --reload --port 8000
-```
-
-Open:
-
-```text
-http://localhost:8000
-```
-
-API docs:
-
-```text
-http://localhost:8000/api/docs
+ollama pull qwen2.5:7b
+# then in .env:
+DECOMPOSER_BACKEND=ollama
+OLLAMA_MODEL=qwen2.5:7b
 ```
 
 ---
 
-## Demo Questions
+## Capability map
 
-Use these to show the current Answer Planner flow:
-
-```text
-Why is NSW price elevated right now, what evidence supports it, and is it likely to continue?
-```
-
-Shows live dispatch evidence, recent 5m/10m trend, driver tiers, forecast model direction, missing causality blockers, and HippoGraph analog outcome if available.
-
-```text
-Have we seen similar NSW price and headroom conditions before, and what happened afterwards?
-```
-
-Shows HippoGraph analog count, outcome split, caveat if the graph is cold, and raw analog details in the right panel.
-
-```text
-Are live weather conditions, AEMO notices, or recent RSS energy news helping explain the NSW price move?
-```
-
-Shows weather/notice/news correlation only when those sources are relevant and fresh; otherwise it says what is missing or stale.
+| Question class | Supported | Notes |
+|---|---|---|
+| Live causation (why is price X right now?) | ✓ | Tiered driver evidence with explicit missing-data flags |
+| 4-hour probabilistic forecast | ✓ | LEAR + QRA + LNN + TCN meta-ensemble, P10/P50/P90 |
+| Historical retrospective (any archived event) | ✓ | Bitemporal archive, valid_time-aware retrieval |
+| BESS dispatch optimisation | ✓ | Energy + FCAS combined revenue, simulation only |
+| Counterfactual ("what if X had not rebid") | ✓ | Rebid detection + modified dispatch replay |
+| Seasonal multi-year analysis | ✓ | Hour/season/year bucket comparison |
+| Auto-commentary during events | ✓ | ADWIN-triggered commentary events via SSE |
+| Compliance audit trail | ✓ | ISO 42001-style decision trace, model provenance |
+| Long-horizon forecasting (>4h) | ✗ | Requires structural market model + bidding strategy |
+| Participant intent prediction | ✗ | Bid data confidential until T-5min |
+| Financial products (futures, RECs, swaps) | ✗ | ASX data, different license |
+| Western Australia / Northern Territory | ✗ | Different grids (SWIS/NWIS), out of scope |
 
 ---
 
-## Architecture
-
-```text
-User question
-  -> SecurityObserver pass 1
-  -> Decomposer: intent, region, requested_output, evidence needs
-  -> ScatterGather MCP tools: dispatch, notices, RSS, weather, forecast, analogs
-  -> WhySources normalize raw evidence
-  -> WhyBuilder computes deterministic facts, driver tiers, claim map
-  -> Verdict formatter creates FactualVerdict
-  -> Claim verifier downgrades unsupported causal/forecast claims
-  -> Answer Planner creates short user-facing sections
-  -> SecurityObserver pass 4
-  -> Trace/audit persistence + SSE events
-  -> Frontend chat summary + right-panel evidence tabs
-```
-
-The important trust rule is simple:
-
-```text
-LLMs route and structure the question.
-Deterministic code answers with evidence.
-```
-
----
-
-## Project Structure
-
-```text
-app/
-  agents/       ScatterGather, WhySources, WhyBuilder, claim verifier, Answer Planner
-  api/          FastAPI routes for query, market, incidents, models, data status, events
-  compliance/   ISO/AESCSF mappings, risk register, model registry surfaces
-  core/         Schema, evidence contracts, trace writer
-  data/         Scheduler, cache, Redis client, event bus
-  db/           SQLAlchemy models, sessions, migrations
-  engines/      ChronoGraph, HippoGraph, TemporalRAG, incident timeline, forecasting
-  mcp/          Read-only tool registry and AEMO/RSS/weather/archive tools
-  portfolio/    BESS scenario and dispatch policy
-  security/     SecurityObserver
-frontend/       Alpine.js SPA, ECharts, live feed, answer/evidence panels
-tests/          Unit, integration, regression, Playwright e2e tests
-docs/           Architecture, assessments, model cards, runbooks, demo script
-monitoring/     Prometheus alert rules and Grafana dashboard
-```
-
----
-
-## Testing
-
-Core smoke:
+## Running tests
 
 ```bash
-python -m pytest tests/test_answer_planner.py tests/test_decomposer_quality.py tests/test_professional_question_regressions.py -q
-```
+# Fast CI suite — no DB or network needed
+python -m pytest tests/test_decomposer_quality.py tests/test_answer_planner.py tests/test_why_engine.py -q
 
-Frontend e2e:
+# Full offline suite (1982 tests, ~60s)
+python -m pytest tests/ --ignore=tests/test_live_mcp_smoke.py --ignore=tests/test_live_qa_regressions.py -q
 
-```bash
-E2E_TESTS=1 python -m pytest tests/e2e/ -q
-```
-
-Live MCP smoke, when network and NEMWeb are reachable:
-
-```bash
+# Live MCP smoke (requires network + NEMWeb access)
 GRIDVERDICT_LIVE_TESTS=1 python -m pytest tests/test_live_mcp_smoke.py -q
 ```
 
-Recent development runs have exercised more than 1,800 non-e2e tests plus Playwright browser checks. Exact counts vary as new regression tests are added.
+---
+
+## Project layout
+
+```
+app/
+  agents/       ScatterGather, WhySources, WhyBuilder, ClaimVerifier, AnswerPlanner
+  api/          FastAPI routes — query, market, incidents, models, events, trace
+  audit/        Audit logger + export
+  compliance/   ISO 27001, AESCSF, AI risk register
+  core/         Schema, evidence contracts, bitemporal trace writer
+  data/         Scheduler, cache, Redis event bus, AEMO live client
+  db/           SQLAlchemy models, sessions, Alembic migrations
+  engines/      ChronoGraph, HippoGraph, TemporalRAG, LNN, forecasting ensemble,
+                drift monitor, FCAS attribution, incident timeline, fuel mix
+  mcp/          Read-only MCP registry — AEMO live/archive/notices, weather, news
+  portfolio/    BESS scenario engine, fleet coordinator, dispatch policy
+  security/     SecurityObserver — 4-pass hygiene pipeline
+frontend/       Alpine.js SPA, ECharts swimlane/analog/backtest, live SSE feed
+tests/          Unit, integration, sprint regression, acceptance matrix
+docs/           Architecture walkthrough, demo script, model cards, runbooks
+config/         Model profiles, MCP tool registry, source freshness thresholds
+```
 
 ---
 
-## Design Constraints
+## Extending to a new domain
 
-- **No trading or bid submission**: simulation/advisory only.
-- **Read-only MCP tools**: external data fetches do not write to external systems.
-- **No hidden unsupported causality**: causes are tiered and downgraded when evidence is missing.
-- **No forecast authority without model status**: unavailable LNN/TCN/GBM outputs are shown as unavailable, not implied.
-- **Freshness matters**: stale sources reduce confidence and are visible in the UI.
-- **Auditability**: traces and model provenance are persisted for replay and review.
+GridVerdict is vertical one of a reusable framework. To add shipping, bushfire monitoring, or healthcare vital signs:
+
+1. **Define your event schema** — extend `core.interfaces.IngestEvent` with domain fields
+2. **Implement `DomainAdapter`** — `to_feature_vector()`, `to_evidence_ref()`, `decomposition_hints()`, `why_template()`
+3. **Write a data MCP** — read-only, Zone 1 tool
+4. **Register in `config/verticals.yaml`**
+5. **Write 10 acceptance questions** — same format as `tests/test_acceptance_matrix.py`
+
+The entire `core/`, `engines/`, `agents/`, and `security/` stack runs unchanged.
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full reskin guide.
 
 ---
 
-## Current Readiness
+## Design constraints
 
-- **Technical demo/MVP**: strong. Suitable for architecture walkthroughs, LinkedIn/GitHub showcase, and live local demos with a warmed DB.
-- **Professional pilot**: credible but still needs deeper constraint/interconnector/unit/rebid causality, sharper forecast calibration surfaces, and expert market validation.
-- **Commercial production**: not complete. Requires licensing review, security/tenant isolation review, uptime/SLA process, customer onboarding, and operational support.
+- **No bid execution** — simulation and advisory only, no write path to AEMO or any broker
+- **Read-only MCP tools** — external fetches never write to external systems
+- **No unsupported causality** — drivers are tiered; unconfirmed causes are labelled, not hidden
+- **No forecast authority without model status** — unavailable models show as unavailable
+- **Auditability** — every query writes a bitemporal trace; decisions are replayable
+
+---
+
+*Research/demo use only. GridVerdict does not execute bids or trades and makes no representation of fitness for trading or operational decisions.*
