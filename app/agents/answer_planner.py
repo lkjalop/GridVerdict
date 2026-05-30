@@ -63,7 +63,7 @@ def plan_answer(
     if requested == "historical_analog_outcome":
         return _plan_retrospective(sources, factual, analogs)
     if requested == "weather_notice_news_correlation":
-        return _plan_weather_news(sources, factual)
+        return _plan_weather_news(sources, factual, hist_dist=hist_dist)
     if requested == "price_fluctuation_attribution":
         return _plan_price_fluctuation(sources, factual, fuel_mix)
     if requested == "fuel_source_recommendation":
@@ -323,7 +323,20 @@ def _plan_retrospective(
     )
 
 
-def _plan_weather_news(sources: WhySources, factual: FactualVerdict) -> PlannedAnswer:
+def _plan_weather_news(
+    sources: WhySources,
+    factual: FactualVerdict,
+    *,
+    hist_dist: dict[str, Any] | None = None,
+) -> PlannedAnswer:
+    c = sources.current
+
+    # When neither weather nor a relevant notice is available, the weather_notice_news
+    # route produces a hollow answer. Fall back to a causal explanation that uses
+    # dispatch evidence (price, demand, headroom) instead of just "unavailable".
+    if not sources.weather.available and not sources.news.explained:
+        return _plan_weather_news_fallback(sources, factual, hist_dist=hist_dist)
+
     headline = "Weather/news context is present, but causality is limited."
     direct: list[str] = []
     if sources.weather.available:
@@ -350,6 +363,75 @@ def _plan_weather_news(sources: WhySources, factual: FactualVerdict) -> PlannedA
         drivers=_driver_lines(sources),
         continuation=[],
         missing=_missing_lines(factual),
+        details=_details(sources, factual),
+    )
+
+
+def _plan_weather_news_fallback(
+    sources: WhySources,
+    factual: FactualVerdict,
+    *,
+    hist_dist: dict[str, Any] | None = None,
+) -> PlannedAnswer:
+    """Fallback when weather + notice are both absent — answer with dispatch facts instead."""
+    c = sources.current
+    trend = _trend_line(sources)
+
+    direct = [
+        f"{c.region} is ${c.price_rrp:.2f}/MWh [{'live' if c.is_fresh else 'stale'}], "
+        f"demand {c.demand_mw:.0f} MW, headroom {c.headroom_mw:.0f} MW.",
+    ]
+    if trend:
+        direct.append(trend)
+
+    # Historical distribution context — answers "why is it low vs yesterday?"
+    hist = hist_dist or {}
+    if hist.get("available"):
+        from app.engines.historical_price import classify_vs_history
+        cls = classify_vs_history(c.price_rrp, hist)
+        direct.append(
+            f"vs last 12 months (same hour): median ${hist['median']:.0f}/MWh, "
+            f"P90 ${hist['p90']:.0f}/MWh — current price is {cls.upper()} by historical standards."
+        )
+
+    direct.append(
+        "Weather causality: weather data was not fetched for this query interval. "
+        "A weather-linked explanation requires live BOM data (wind speed, temperature, solar irradiance)."
+    )
+    direct.append(
+        "AEMO notice: no active LOR, RECLASSIFY, or DIRECTIONS notice matches this price move."
+    )
+
+    evidence = [
+        f"Dispatch is {'fresh' if c.is_fresh else 'stale'} ({c.staleness_seconds}s old).",
+    ]
+    if sources.drivers.binding_constraints:
+        bc_names = [
+            b.get("element_id") or b.get("constraint_id") or "?"
+            for b in sources.drivers.binding_constraints[:3]
+        ]
+        evidence.append(
+            f"{len(sources.drivers.binding_constraints)} binding constraint(s): "
+            f"{', '.join(bc_names)} — this may be the primary driver."
+        )
+
+    drivers = _driver_lines(sources)
+    analog_line = _analog_outcome_line(sources)
+    if analog_line:
+        drivers.append(analog_line)
+
+    missing = [
+        "weather consensus (BOM data not fetched for this query)",
+        "AEMO market notice (none active for this interval)",
+    ] + _missing_lines(factual)[:2]
+
+    return PlannedAnswer(
+        headline=f"{c.region} price context — weather and notice evidence absent.",
+        direct_answer=direct,
+        key_evidence=evidence,
+        drivers=drivers,
+        continuation=_continuation_lines(sources),
+        missing=missing[:4],
         details=_details(sources, factual),
     )
 

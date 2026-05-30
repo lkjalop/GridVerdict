@@ -300,10 +300,32 @@ async def submit_query(
     # When the query is RETROSPECTIVE with a resolvable past anchor, route to the
     # archive DB rather than the live NEMWeb feed.  For multi-hop queries
     # (historical + forecast), run both and merge.
+    #
+    # IMPORTANT: "why is it NOT $X like YESTERDAY" is a LIVE query with historical
+    # reference for context — it is NOT a retrospective. Detect negation comparison
+    # patterns and keep them on the live path + historical price distribution (hist_dist).
+    # Only RETROSPECTIVE intent ("what happened yesterday?") uses historical scatter.
+    _negation_comparison = bool(
+        decomp.requires_history
+        and decomp.intent == IntentLabel.EXPLANATION
+        and any(
+            phrase in _text_lower
+            for phrase in [
+                "not $", "why isn't", "why is it not", "why hasn't", "lower than",
+                "not as high", "not as elevated", "not like", "fallen from", "dropped from",
+                "cheaper than", "below what", "below yesterday", "not $160", "not $100",
+                "much lower", "why so low", "why so cheap", "used to be", "used to cost",
+            ]
+        )
+    )
     _hist_anchor: "datetime | None" = None
     _try_historical = (
         decomp.intent == IntentLabel.RETROSPECTIVE
-        or (decomp.requires_history and decomp.intent == IntentLabel.EXPLANATION)
+        or (
+            decomp.requires_history
+            and decomp.intent == IntentLabel.EXPLANATION
+            and not _negation_comparison   # "not $X like yesterday" stays on live path
+        )
     )
     if _try_historical:
         try:
@@ -335,17 +357,23 @@ async def submit_query(
         from app.agents.scatter_gather import scatter_gather_historical, _merge_historical_and_live
         gather = await scatter_gather_historical(region, _hist_anchor, db)
 
-        # Multi-hop: also run a live gather for the forecast half of the query
-        if decomp.requires_forecast and gather.dispatch is not None:
+        # Always merge live weather when the query explicitly mentions weather/wind/renewable —
+        # scatter_historical has no weather task, so without this weather is always None.
+        # Also merge live forecast context for forecast-needing queries.
+        if include_weather or decomp.requires_forecast:
             try:
                 import asyncio as _aio
                 _live = await _aio.wait_for(
-                    scatter_gather(region, client, cache, include_weather=False),
-                    timeout=8.0,
+                    scatter_gather(
+                        region, client, cache,
+                        include_weather=include_weather,
+                        include_commentary=False,
+                    ),
+                    timeout=10.0,
                 )
                 gather = _merge_historical_and_live(gather, _live)
             except Exception as _live_err:
-                logger.debug("Multi-hop live gather failed (non-fatal): %s", _live_err)
+                logger.debug("Historical weather/forecast merge failed (non-fatal): %s", _live_err)
 
         if gather.dispatch is None:
             # No archive data found — downgrade to insufficient data, don't run live gather
@@ -407,6 +435,53 @@ async def submit_query(
             if g.dispatch
         } if comparison_gathers else None,
     })
+
+    # --- 2b. Routing alignment check (adversarial critic for data anchor mismatch) ---
+    # When the gathered dispatch is much older than now AND the intent is EXPLANATION,
+    # the historical routing may have picked the wrong anchor. The user said "like yesterday"
+    # as a comparison reference, not as the subject of the query.
+    # Detect and self-correct by falling back to live scatter.
+    if (
+        gather.dispatch is not None
+        and not gather.dispatch_fresh
+        and decomp.intent == IntentLabel.EXPLANATION
+        and _hist_anchor is not None
+    ):
+        _anchor_age_h = (datetime.now(timezone.utc) - gather.dispatch.valid_time).total_seconds() / 3600
+        if _anchor_age_h > 2:
+            # Data is more than 2 hours old for an EXPLANATION query — likely a routing mismatch.
+            # The user probably wants TODAY's state explained, not 2h+ ago.
+            # Self-correct: re-run live scatter and merge, preserving historical as context.
+            logger.info(
+                "Routing alignment check: historical anchor %s is %.1fh old for EXPLANATION intent — "
+                "self-correcting to live scatter for %s",
+                _hist_anchor.isoformat(), _anchor_age_h, region,
+            )
+            _events.append({
+                "step": "ROUTING_CORRECTION",
+                "t_ms": round((time.perf_counter() - _t0) * 1000),
+                "reason": f"historical anchor {_anchor_age_h:.1f}h old for EXPLANATION intent — switching to live",
+                "old_price": round(gather.dispatch.price_rrp, 2),
+                "old_interval": gather.dispatch.valid_time.isoformat(),
+            })
+            try:
+                from app.agents.scatter_gather import _merge_historical_and_live
+                _live_corrected = await scatter_gather(
+                    region, client, cache,
+                    include_weather=include_weather,
+                    include_commentary=include_commentary,
+                )
+                # Use live as primary; keep historical analogs, driver events, notices
+                _corrected = _merge_historical_and_live(gather, _live_corrected)
+                # Swap dispatch to live (main subject is current state)
+                from dataclasses import replace as _dc_replace
+                gather = _dc_replace(
+                    _corrected,
+                    dispatch=_live_corrected.dispatch,
+                    dispatch_fresh=_live_corrected.dispatch_fresh,
+                )
+            except Exception as _rc_err:
+                logger.debug("Routing correction live scatter failed (non-fatal): %s", _rc_err)
 
     if gather.dispatch:
         gather.recent_dispatch = await _load_recent_dispatch_context(db, region, gather.dispatch.valid_time)
