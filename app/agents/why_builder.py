@@ -715,7 +715,7 @@ def _build_claim_map(
     # CONSTRAINT_BINDING — direct AEMO dispatch constraint data
     bc = getattr(drivers, "binding_constraints", [])
     if bc:
-        names = [b.get("constraint_id", b.get("name", "")) for b in bc[:3]]
+        names = [b.get("element_id") or b.get("constraint_id") or b.get("name") or "" for b in bc[:3]]
         label_str = f"Binding constraint{'s' if len(bc) > 1 else ''}: {', '.join(filter(None, names))}"
         c_ref_ids = [r.id for r in evidence_refs if "CONSTRAINT" in r.source or "DISPATCHCONSTRAINT" in r.source]
         result.append(ClaimMapItem(
@@ -879,7 +879,10 @@ def _build_next_watch(
     # ── Binding constraints ──────────────────────────────────────────
     bc = getattr(drivers, "binding_constraints", [])
     if bc:
-        names = [b.get("constraint_id", b.get("name", "unnamed")) for b in bc[:3]]
+        names = [
+            b.get("element_id") or b.get("constraint_id") or b.get("name") or "?"
+            for b in bc[:3]
+        ]
         joined = ", ".join(names)
         items.append(
             f"Watch constraint{'s' if len(bc) > 1 else ''} {joined} — "
@@ -1632,9 +1635,18 @@ def _build_causal_chain_steps(sources, intent: "IntentLabel", missing_data: list
 
     # Step 1: Always available (live price is always T1)
     age = c.staleness_seconds
-    age_label = f"{age}s old" if age < 300 else f"{age//60}m old (stale)"
+    if age < 0:
+        age_label = "live (fresh)"
+    elif age < 300:
+        age_label = f"{age}s old"
+    elif age < 3600:
+        age_label = f"{age//60}m old (stale — refresh or check AEMO connectivity)"
+    else:
+        # Very old: this is historical data used for a retrospective query
+        age_label = f"historical data (~{age//3600}h old — this is the anchor time for your query)"
+    label = "Historical dispatch price" if age > 3600 else "Live dispatch price"
     chain.append(
-        f"✓ Live dispatch price: ${c.price_rrp:.0f}/MWh, "
+        f"✓ {label}: ${c.price_rrp:.0f}/MWh, "
         f"demand {c.demand_mw:.0f} MW, headroom {c.headroom_mw:.0f} MW — {age_label}"
     )
 
