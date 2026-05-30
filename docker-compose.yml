@@ -29,6 +29,9 @@ services:
       LOG_LEVEL: INFO
       GRIDVERDICT_DEV_NO_AUTH: ${GRIDVERDICT_DEV_NO_AUTH:-false}
       ENABLE_EXPERIMENTAL_SEQUENCE_FORECASTERS: "true"
+      DECOMPOSER_BACKEND: "ollama"
+      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+      OLLAMA_MODEL: "qwen3:14b"
     volumes:
       - nemweb_cache:/app/cache/nemweb
       - ./frontend:/app/frontend:ro
