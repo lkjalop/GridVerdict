@@ -115,6 +115,8 @@ def format_verdict(why: WhyOutput, sources: WhySources, trace_id: str | None) ->
         claim_tiers=why.claim_tiers,
         claim_map=why.claim_map,
         next_watch=why.next_watch,
+        upgrade_path=why.upgrade_path,
+        causal_chain=why.causal_chain,
         trace_id=trace_id,
     )
 

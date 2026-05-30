@@ -231,8 +231,9 @@ def apply_plan_to_verdict(factual: FactualVerdict, plan: PlannedAnswer) -> Factu
 def _plan_explanation(sources: WhySources, factual: FactualVerdict, *, include_forecast: bool) -> PlannedAnswer:
     c = sources.current
     headline = f"{c.region} price is {c.regime}, but the primary driver is not confirmed."
+    _dispatch_tier = "[live]" if c.is_fresh else "[stale]"
     direct = [
-        f"{c.region} is ${c.price_rrp:.2f}/MWh with {c.headroom_mw:.0f} MW headroom.",
+        f"{c.region} is ${c.price_rrp:.2f}/MWh {_dispatch_tier} with {c.headroom_mw:.0f} MW headroom.",
     ]
 
     # E5: ChronoGraph regime state — change-point and quantile rank
@@ -490,14 +491,23 @@ def _plan_fuel_source(
     data_tier = mix.get("data_tier") or "unknown"
     query = (sources.decomp.raw_query or "").lower()
 
+    # Inline tier label so professionals immediately know evidence quality
+    _tier_label = {
+        "dispatch": "[live dispatch]",
+        "bid_reconstruction": "[bid reconstruction]",
+        "capacity": "[capacity data]",
+        "prior": "[prior model]",
+    }.get(data_tier, f"[{data_tier}]")
+
     direct = []
     if "coal" in requested and best != "coal":
         direct.append(
-            f"No: based on the current source model, coal is not the preferred source now; {best} ranks ahead at ${float(spot):.2f}/MWh."
+            f"No: based on the current source model {_tier_label}, coal is not the preferred source now; "
+            f"{best} ranks ahead at ${float(spot):.2f}/MWh."
         )
     else:
         direct.append(
-            f"The source model currently prefers {best} at ${float(spot):.2f}/MWh."
+            f"The source model {_tier_label} currently prefers {best} at ${float(spot):.2f}/MWh."
         )
     if preferred:
         direct.append("Preferred order: " + " > ".join(preferred) + ".")
@@ -1110,3 +1120,58 @@ def _swing_label(swing: float) -> str:
 def _cap(items: list[str], n: int = 3) -> list[str]:
     clean = [str(i) for i in items if str(i).strip()]
     return clean[:n]
+
+
+# ── Per-sub-question confidence scoring (Sprint U) ───────────────────────────
+
+_SQ_EVIDENCE_REQUIREMENTS: dict[str, Any] = {
+    "current_price_reason":          lambda s: 0.90 if s.current.is_fresh else 0.30,
+    "fuel_source_comparison":        lambda s: 0.70 if s.technology.has_unit_evidence else 0.35,
+    "historical_price_distribution": lambda s: (
+        0.80 if getattr(s, "hist_dist_available", False)
+        else 0.10
+    ),
+    "forecast_outlook":              lambda s: 0.75 if s.forecast.available else 0.20,
+    "price_forecast":                lambda s: 0.75 if s.forecast.available else 0.20,
+    "regime_change":                 lambda s: 0.70 if s.analogs.count >= 5 else 0.15,
+    "fcas_opportunity":              lambda s: 0.80 if s.fcas.available else 0.10,
+    "interconnector_causality":      lambda s: (
+        0.65 if s.drivers.tight_interconnectors else 0.20
+    ),
+    "price_fluctuation":             lambda s: 0.80 if s.current.is_fresh else 0.25,
+    "market_status":                 lambda s: 0.90 if s.current.is_fresh else 0.30,
+}
+
+
+def score_sub_questions(sources: "WhySources") -> dict[str, float]:
+    """Return coverage score per sub-question type (0.0–1.0).
+
+    The headline confidence should be min(scores) — the weakest sub-question
+    drives the overall answer quality. This makes it visible to the professional
+    which part of a multi-part question has thin evidence.
+    """
+    return {
+        sq["type"]: _SQ_EVIDENCE_REQUIREMENTS.get(sq["type"], lambda s: 0.50)(sources)
+        for sq in (sources.decomp.sub_questions or [])
+        if sq.get("type")
+    }
+
+
+def apply_sub_question_scores(factual: "FactualVerdict", sources: "WhySources") -> "FactualVerdict":
+    """Compute per-sub-question confidence and set it on the verdict.
+
+    When sub_questions are present, also adjusts the headline confidence to
+    min(sub_question_scores) so the weakest-evidenced part drives the display.
+    The prior confidence (from why_builder) remains in why_builder's estimate;
+    this function only adjusts when sub_questions push confidence down further.
+    """
+    scores = score_sub_questions(sources)
+    if not scores:
+        return factual
+    min_score = min(scores.values())
+    # Only pull confidence down — never inflate above what why_builder set
+    new_conf = round(min(factual.confidence, min_score), 3)
+    return factual.model_copy(update={
+        "sub_question_scores": scores,
+        "confidence": new_conf,
+    })

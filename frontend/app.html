@@ -569,6 +569,86 @@
                 </template>
               </div>
 
+              <!-- Sprint U: next_watch alert chips — operational watch thresholds -->
+              <template x-if="viewport.data.verdict.next_watch?.length">
+                <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;">
+                  <span style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);align-self:center;">Watch</span>
+                  <template x-for="w in viewport.data.verdict.next_watch.slice(0,3)" :key="w">
+                    <span style="font-size:11px;padding:3px 8px;background:rgba(245,158,11,.10);color:#f59e0b;border:1px solid rgba(245,158,11,.25);border-radius:4px;font-family:var(--font-mono);"
+                          x-text="w"></span>
+                  </template>
+                </div>
+              </template>
+
+              <!-- Sprint U: upgrade_path — what would improve this answer -->
+              <template x-if="viewport.data.verdict.upgrade_path?.length">
+                <div class="card" style="padding:0;" x-data="{ showUpgrade: false }">
+                  <div class="card__header" style="cursor:pointer;" @click="showUpgrade = !showUpgrade">
+                    <span class="card__label">What would improve this answer</span>
+                    <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">evidence gaps → confidence impact</span>
+                    <span class="collapsible-arrow" style="margin-left:auto;" :class="showUpgrade ? 'collapsible-arrow--open' : ''">›</span>
+                  </div>
+                  <div x-show="showUpgrade" class="card__body" style="display:grid;gap:6px;">
+                    <template x-for="path in viewport.data.verdict.upgrade_path" :key="path">
+                      <div style="font-size:12px;line-height:1.5;color:var(--text-secondary);padding-left:8px;border-left:2px solid var(--verdict-low);"
+                           x-text="path"></div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Sprint U: causal chain — step-by-step evidence availability for EXPLANATION -->
+              <template x-if="viewport.data.verdict.causal_chain?.length">
+                <div class="card" style="padding:0;" x-data="{ showChain: false }">
+                  <div class="card__header" style="cursor:pointer;" @click="showChain = !showChain">
+                    <span class="card__label">Causal Evidence Chain</span>
+                    <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">why INSUFFICIENT DATA — what's confirmed vs missing</span>
+                    <span class="collapsible-arrow" style="margin-left:auto;" :class="showChain ? 'collapsible-arrow--open' : ''">›</span>
+                  </div>
+                  <div x-show="showChain" class="card__body" style="display:grid;gap:5px;">
+                    <template x-for="step in viewport.data.verdict.causal_chain" :key="step">
+                      <div style="font-size:12px;line-height:1.4;font-family:var(--font-mono);padding:3px 8px;border-radius:3px;"
+                           :style="step.startsWith('✓') ? 'background:rgba(34,197,94,.08);color:#22c55e;' : step.startsWith('✗') ? 'background:rgba(239,68,68,.06);color:var(--text-secondary);' : 'color:var(--text-muted);font-style:italic;padding-left:0;'"
+                           x-text="step"></div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Sprint U: counterargument always visible for SUPPORTED verdicts -->
+              <template x-if="viewport.data.verdict.counterargument && viewport.data.verdict.verdict === 'SUPPORTED'">
+                <div class="card" style="padding:0;" x-data="{ showChallenge: false }">
+                  <div class="card__header" style="cursor:pointer;" @click="showChallenge = !showChallenge">
+                    <span class="card__label">Challenges</span>
+                    <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">best argument against this verdict</span>
+                    <span class="collapsible-arrow" style="margin-left:auto;" :class="showChallenge ? 'collapsible-arrow--open' : ''">›</span>
+                  </div>
+                  <div x-show="showChallenge" class="card__body" style="font-size:13px;line-height:1.6;color:var(--text-secondary);"
+                       x-text="viewport.data.verdict.counterargument"></div>
+                </div>
+              </template>
+
+              <!-- Sprint U: sub-question evidence strength bar -->
+              <template x-if="Object.keys(viewport.data.verdict.sub_question_scores || {}).length > 1">
+                <div style="padding:8px 0 4px;">
+                  <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px;">Evidence strength per question</div>
+                  <div style="display:grid;gap:4px;">
+                    <template x-for="[sq, score] in Object.entries(viewport.data.verdict.sub_question_scores || {})" :key="sq">
+                      <div style="display:flex;align-items:center;gap:8px;">
+                        <span style="font-size:11px;color:var(--text-muted);min-width:160px;font-family:var(--font-mono);"
+                              x-text="sq.replace(/_/g,' ')"></span>
+                        <div style="flex:1;height:5px;background:var(--bg-hover);border-radius:3px;overflow:hidden;">
+                          <div style="height:100%;border-radius:3px;transition:width .3s;"
+                               :style="`width:${score*100}%;background:${score>=0.7?'var(--verdict-supported)':score>=0.4?'#f59e0b':'var(--verdict-insufficient)'}`"></div>
+                        </div>
+                        <span style="font-size:11px;color:var(--text-muted);min-width:32px;"
+                              x-text="`${Math.round(score*100)}%`"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
               <!-- Decision Path — two-column audit table -->
               <template x-if="viewport.data?.pipeline_events?.length">
                 <div class="card" style="padding:0;">

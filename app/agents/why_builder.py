@@ -38,6 +38,8 @@ class WhyOutput:
     claim_tiers: list[dict] = field(default_factory=list)     # [{label, tier, present, evidence_ref_ids}]
     claim_map: list[ClaimMapItem] = field(default_factory=list)  # typed claim map
     next_watch: list[str] = field(default_factory=list)          # actionable operational thresholds
+    upgrade_path: list[str] = field(default_factory=list)        # "X present → confidence 60→82%"
+    causal_chain: list[str] = field(default_factory=list)        # ordered evidence steps for WHY
 
 
 def build_why(sources: WhySources) -> WhyOutput:
@@ -307,6 +309,51 @@ def build_why(sources: WhySources) -> WhyOutput:
     else:
         missing_data.append("unit_dispatch_events")
 
+    # ── Marginal price-setter identification (Sprint T) ───────────────
+    # Runs whenever we have unit dispatch data OR need a causal explanation.
+    # Upgrades fuel attribution from prior cost model to dispatch-backed evidence.
+    _marginal_setter = None
+    if decomp.intent in (IntentLabel.EXPLANATION, IntentLabel.ACTION_RECOMMENDATION):
+        try:
+            from app.engines.marginal_setter import identify_marginal_setter
+            _unit_ev = list(technology.events) if technology.events else []
+            _driver_ev = list(drivers.events) if hasattr(drivers, "events") and drivers.events else []
+            _marginal_setter = identify_marginal_setter(
+                unit_events=_unit_ev,
+                driver_events=_driver_ev,
+                spot_price=c.price_rrp,
+                region=c.region,
+            )
+            _tier = _marginal_setter.data_tier
+            if _tier in ("dispatch", "bid_reconstruction"):
+                # Upgrade the narrative: replace generic "dispatch constraints missing"
+                # with a confirmed marginal setter sentence
+                parts.append(
+                    f"Marginal price setter: {_marginal_setter.display_name} "
+                    f"(${_marginal_setter.estimated_price_mwh:.0f}/MWh prior, "
+                    f"{_tier} evidence). "
+                    f"{_marginal_setter.explanation}"
+                )
+                if _marginal_setter.constraint_narrative:
+                    parts.append(_marginal_setter.constraint_narrative)
+                if _marginal_setter.interconnector_narrative:
+                    parts.append(_marginal_setter.interconnector_narrative)
+                # Add an evidence ref for the marginal setter identification
+                evidence_refs.append(EvidenceRefSchema(
+                    source=f"MARGINAL_SETTER_{_tier.upper()}",
+                    region=c.region,
+                    interval=c.valid_time,
+                    field="marginal_fuel_type",
+                    value=_marginal_setter.estimated_price_mwh,
+                    raw_ref=f"marginal_setter_{_marginal_setter.fuel_type}",
+                ))
+            else:
+                # Prior model — still surface the price-bracket inference
+                parts.append(_marginal_setter.explanation)
+        except Exception as _ms_exc:
+            import logging as _logging
+            _logging.getLogger(__name__).debug("Marginal setter identification failed: %s", _ms_exc)
+
     # ── Historical analogs from HippoGraph PPR ────────────────────────
     if analogs.count >= 3:
         outcome_clause = ""
@@ -393,6 +440,12 @@ def build_why(sources: WhySources) -> WhyOutput:
     n_watch = _build_next_watch(c, forecast, drivers, analogs, sources.weather, sources.news)
     answer_sections = _build_answer_sections(sources, evidence_refs, missing_data, why_text)
 
+    # Sprint U: upgrade_path — what data would improve this verdict and by how much
+    upgrade_path = _compute_upgrade_path(sources, missing_data, analogs, technology, forecast)
+
+    # Sprint U: causal chain — ordered evidence steps for EXPLANATION intent
+    causal_chain = _build_causal_chain_steps(sources, decomp.intent, missing_data)
+
     return WhyOutput(
         why_plain_english=why_text,
         counterargument=counterarg,
@@ -404,6 +457,8 @@ def build_why(sources: WhySources) -> WhyOutput:
         claim_tiers=c_tiers,
         claim_map=c_map,
         next_watch=n_watch,
+        upgrade_path=upgrade_path,
+        causal_chain=causal_chain,
     )
 
 
@@ -1506,6 +1561,157 @@ def _build_counterargument(c, analogs, news, forecast) -> str:
             )
 
     return " ".join(points)
+
+
+def _compute_upgrade_path(sources, missing_data: list[str], analogs, technology, forecast) -> list[str]:
+    """Map each missing evidence gap to its confidence impact.
+
+    Answers the professional question: 'I see 60% — how do I get to 85%?'
+    Each item is a one-line statement of: what data → what confidence change.
+    """
+    paths: list[str] = []
+    c = sources.current
+
+    if "unit_dispatch_events" in missing_data or not technology.has_unit_evidence:
+        paths.append(
+            "Unit dispatch data (DISPATCHLOAD) ingested → fuel rank tier: PRIOR → DISPATCH, "
+            "fuel-source confidence 35% → 80%, 'unit dispatch by fuel' removed from MISSING"
+        )
+    if "dispatch_constraints" in missing_data:
+        paths.append(
+            "Binding constraint data (DISPATCHCONSTRAINT) ingested → constraint causal role: "
+            "UNCONFIRMED → SUPPORTED, 'dispatch_constraints' removed from MISSING"
+        )
+    if "historical_analogs" in missing_data or analogs.count < 5:
+        needed = max(0, 5 - analogs.count)
+        paths.append(
+            f"HippoGraph needs {needed} more comparable intervals "
+            f"(currently {analogs.count}/5 minimum) → analog pattern: unavailable → MEDIUM, "
+            "confidence +15%"
+        )
+    if not forecast.available or all(not m.available for m in (forecast.model_detail or [])):
+        lnn_ready = any(
+            m.model in {"lnn", "lnn_cfc"} and m.available
+            for m in (forecast.model_detail or [])
+        )
+        if not lnn_ready:
+            paths.append(
+                "LNN training complete (needs 288+ dispatch intervals ≈ 1 day) → "
+                "forecast: LEAR/QRA-only → full ensemble, confidence +5–10%"
+            )
+    if "dispatch_interconnector_flows" in missing_data:
+        paths.append(
+            "Interconnector flow data (DISPATCHINTERCONNECTORRES) → "
+            "regional price separation: UNCONFIRMED → SUPPORTED for comparison queries"
+        )
+    if not c.is_fresh:
+        paths.append(
+            "Live dispatch price (AEMO NEMWeb) refreshed → "
+            "confidence floor: 10% → 50% (stale data caps all evidence tiers)"
+        )
+
+    return paths[:4]   # cap at 4 items in the UI
+
+
+def _build_causal_chain_steps(sources, intent: "IntentLabel", missing_data: list[str]) -> list[str]:
+    """Build an ordered causal evidence chain for EXPLANATION queries.
+
+    Shows which steps of the NEM causal chain are available vs missing.
+    This directly answers: 'Why does the system show INSUFFICIENT_DATA?'
+    Each item is one step in the causal reasoning chain with status.
+    """
+    from app.core.schema import IntentLabel as _IL
+    if intent not in (_IL.EXPLANATION, _IL.ACTION_RECOMMENDATION):
+        return []
+
+    c = sources.current
+    technology = sources.technology
+    drivers = sources.drivers
+
+    chain: list[str] = []
+
+    # Step 1: Always available (live price is always T1)
+    age = c.staleness_seconds
+    age_label = f"{age}s old" if age < 300 else f"{age//60}m old (stale)"
+    chain.append(
+        f"✓ Live dispatch price: ${c.price_rrp:.0f}/MWh, "
+        f"demand {c.demand_mw:.0f} MW, headroom {c.headroom_mw:.0f} MW — {age_label}"
+    )
+
+    # Step 2: Binding constraints
+    if drivers.binding_constraints:
+        chain.append(
+            f"✓ Constraint evidence: {len(drivers.binding_constraints)} binding constraint(s) — "
+            "confirmed contribution to dispatch cost"
+        )
+    else:
+        chain.append(
+            "✗ Binding constraints: not available — "
+            "cannot confirm whether a transmission limit raised the dispatch cost"
+        )
+
+    # Step 3: Unit dispatch by fuel
+    if technology.has_unit_evidence:
+        fuel_summary = ", ".join(
+            f"{fuel} {b.get('total_cleared_mw', 0):.0f} MW"
+            for fuel, b in list(technology.by_fuel.items())[:4]
+            if fuel != "unknown"
+        )
+        tier = "bid_reconstruction" if any(
+            e.get("source") == "BID_RECONSTRUCTION"
+            for e in technology.events
+        ) else "live dispatch"
+        chain.append(
+            f"✓ Unit dispatch ({tier}): {fuel_summary} — "
+            "fuel-type attribution available"
+        )
+    else:
+        chain.append(
+            "✗ Unit dispatch by fuel: not yet available — "
+            "cannot confirm which generator technology set the price "
+            "(seeds within 5min of first archive gap-fill)"
+        )
+
+    # Step 4: Bid/rebid stack
+    has_rebid = any("rebid" in str(d) for d in drivers.binding_constraints)
+    if has_rebid:
+        chain.append("✓ Rebid evidence: detected — strategic availability withdrawal confirmed")
+    else:
+        chain.append(
+            "✗ Bid/rebid stack: not yet available — "
+            "cannot confirm whether a generator changed its offer intra-day "
+            "(BIDPEROFFER requires archive gap-fill)"
+        )
+
+    # Step 5: Interconnector
+    if drivers.tight_interconnectors:
+        chain.append(
+            f"✓ Interconnector: {len(drivers.tight_interconnectors)} near limit — "
+            "import/export constraint on regional supply confirmed"
+        )
+    else:
+        chain.append(
+            "✗ Interconnector flows: not available — "
+            "cannot confirm whether import congestion contributed to price"
+        )
+
+    # Append the 'verdict if complete' line
+    missing_count = sum(1 for step in chain if step.startswith("✗"))
+    if missing_count == 0:
+        verdict_if_complete = "All causal steps confirmed — verdict would be SUPPORTED at 85%+"
+    elif missing_count <= 2:
+        verdict_if_complete = (
+            f"{missing_count} gap(s) remain — verdict would reach SUPPORTED at 70–80% "
+            "once unit dispatch data is present"
+        )
+    else:
+        verdict_if_complete = (
+            f"{missing_count} causal steps missing — INSUFFICIENT_DATA is correct. "
+            "Primary gap: unit dispatch by fuel (fills automatically within 1 hour of archive run)"
+        )
+    chain.append(f"→ {verdict_if_complete}")
+
+    return chain
 
 
 def _estimate_confidence(live_fresh: bool, analog_count: int, news_explained: bool) -> float:

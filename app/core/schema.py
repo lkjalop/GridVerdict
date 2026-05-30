@@ -180,6 +180,9 @@ class FactualVerdict(BaseModel):
     claim_tiers: list[dict] = Field(default_factory=list)    # legacy: [{label, tier, present, evidence_ref_ids}]
     claim_map: list[ClaimMapItem] = Field(default_factory=list)  # typed replacement for claim_tiers
     next_watch: list[str] = Field(default_factory=list)          # actionable: what to monitor next
+    upgrade_path: list[str] = Field(default_factory=list)        # "X ingested → confidence 60→82%"
+    sub_question_scores: dict[str, float] = Field(default_factory=dict)  # per-sub-question coverage
+    causal_chain: list[str] = Field(default_factory=list)        # ordered evidence steps for EXPLANATION
     disclaimer: str = (
         "Simulation and decision-support only. Not financial advice. "
         "Not a market participant. Uses public AEMO/NEMWEB data."

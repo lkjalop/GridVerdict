@@ -45,6 +45,9 @@ reports/
 Dump/
 dump/
 
+# Runtime data — logs, weights, manifests, caches (never commit)
+data/
+
 # IDE
 .vscode/
 .idea/

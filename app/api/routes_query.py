@@ -213,6 +213,52 @@ async def submit_query(
         **({"clarifying": decomp.clarifying_question} if decomp.clarifying_question else {}),
     })
 
+    # --- 1a. Ambiguity gate — return clarifying question instead of guessing ---
+    # Fires when decomposer confidence is low AND a clarifying question is available.
+    # Threshold 0.62: decomposer eval suite runs at 85%+ accuracy; below 0.62 is
+    # genuine ambiguity where guessing produces worse answers than asking.
+    # LOOKUP and OUT_OF_SCOPE are exempt — they can always be answered (or refused).
+    _AMBIG_THRESHOLD = 0.62
+    try:
+        _decomp_conf = float(decomp.confidence)
+    except (TypeError, ValueError):
+        _decomp_conf = 1.0   # if confidence is not a float, don't fire the gate
+    if (
+        _decomp_conf < _AMBIG_THRESHOLD
+        and decomp.clarifying_question
+        and len(body.text.split()) > 8
+        and decomp.intent not in (IntentLabel.LOOKUP, IntentLabel.OUT_OF_SCOPE)
+    ):
+        _clarif_verdict = FactualVerdict(
+            verdict=VerdictLabel.NEEDS_CLARIFICATION,
+            action=ActionLabel.ASK_CLARIFYING_QUESTION,
+            confidence=decomp.confidence,
+            confidence_band=ConfidenceBand.LOW,
+            as_of=datetime.now(timezone.utc),
+            why_plain_english=decomp.clarifying_question,
+            counterargument="",
+            missing_data=[],
+            answer_sections=[
+                {"title": "Clarification needed", "items": [decomp.clarifying_question]},
+            ],
+            answer_details={
+                "headline": "Query is ambiguous — please clarify.",
+                "ambiguities": decomp.ambiguities,
+                "detected_intent": decomp.intent.value,
+            },
+        )
+        _events.append({"step": "AMBIGUITY_GATE", "t_ms": round((time.perf_counter() - _t0) * 1000),
+                         "confidence": round(decomp.confidence, 2), "fired": True})
+        return QueryResponse(
+            query_id=query_id,
+            session_id=session_id,
+            intent=decomp.intent.value,
+            verdict=_clarif_verdict,
+            decomposition=decomp.model_dump(mode="json"),
+            viewport_type="answer",
+            pipeline_events=_events,
+        )
+
     # --- 1b. Security pass 2 — decomposition intent check ---
     decomp_check = observer.pass_decomposition(decomp.model_dump())
     append_observer_result(decomp_check, "decomposition")
@@ -577,6 +623,13 @@ async def submit_query(
         )
     except Exception as exc:
         logger.debug("Answer planner unavailable for %s: %s", query_id, exc)
+
+    # Sprint U: per-sub-question confidence — weakest sub-question drives headline
+    try:
+        from app.agents.answer_planner import apply_sub_question_scores
+        factual = apply_sub_question_scores(factual, why_sources)
+    except Exception as exc:
+        logger.debug("Sub-question scoring failed (non-fatal): %s", exc)
     _events.append({
         "step": "ANSWER_PLAN",
         "t_ms": round((time.perf_counter() - _t0) * 1000),
