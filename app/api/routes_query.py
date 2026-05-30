@@ -427,7 +427,14 @@ async def submit_query(
     fuel_mix: dict | None = None
     try:
         from app.engines.fuel_mix import get_fuel_mix
-        fuel_mix = await get_fuel_mix(region, db, weather=gather.weather)
+        # Pass T9 scatter unit_events so fuel_mix uses live dispatch data (tier 0)
+        # instead of re-querying the DB (tier 1). Only saves a round-trip but also
+        # ensures the fuel recommendation uses the same interval as the answer.
+        fuel_mix = await get_fuel_mix(
+            region, db,
+            weather=gather.weather,
+            unit_events=gather.unit_events or None,
+        )
     except Exception as exc:
         logger.debug("Fuel mix retrieval failed (non-fatal): %s", exc)
 

@@ -145,7 +145,7 @@ async def scatter_gather(
         if isinstance(t1_raw, Exception):
             logger.warning("ScatterGather T1 (dispatch) failed: %s", t1_raw)
 
-    # T2–T8 — parallel tasks wrapped so they never raise
+    # T2–T10 — parallel tasks wrapped so they never raise
     _ptasks = [
         ("AEMO_MARKET_NOTICES",    _task_notices(region, cache)),
         ("HIPPOGRAPH_ANALOGS",     _task_analogs(region, dispatch_for_analogs)),
@@ -153,6 +153,8 @@ async def scatter_gather(
         ("AEMO_PREDISPATCH",       _task_predispatch(region, client, cache)),
         ("NEM_NEWS_RSS",           _task_news_sentiment(region, cache)),
         ("FCAS_PRICES",            _task_fcas(region, dispatch_for_analogs)),
+        ("UNIT_DISPATCH",          _task_unit_dispatch(region, dispatch_for_analogs)),
+        ("MARKET_DRIVERS",         _task_driver_events(region, dispatch_for_analogs)),
     ]
     if include_weather:
         _ptasks.append(("WEATHER_CONSENSUS", _task_weather(region, cache)))
@@ -181,13 +183,15 @@ async def scatter_gather(
     predispatch_result   = _pdata[3] if isinstance(_pdata[3], list) else []
     news_items_result    = _pdata[4] if isinstance(_pdata[4], list) else []
     fcas_result          = _pdata[5] if isinstance(_pdata[5], dict) else None
-    _weather_idx = 6
+    unit_events_result   = _pdata[6] if isinstance(_pdata[6], list) else []
+    driver_events_result = _pdata[7] if isinstance(_pdata[7], list) else []
+    _weather_idx = 8
     weather_result = (
         _pdata[_weather_idx]
         if include_weather and len(_pdata) > _weather_idx and isinstance(_pdata[_weather_idx], dict)
         else None
     )
-    _commentary_idx = 6 + (1 if include_weather else 0)
+    _commentary_idx = 8 + (1 if include_weather else 0)
     commentary_result: list[dict[str, Any]] = (
         _pdata[_commentary_idx]
         if include_commentary and len(_pdata) > _commentary_idx and isinstance(_pdata[_commentary_idx], list)
@@ -223,6 +227,8 @@ async def scatter_gather(
         _pdata[3] is not None,  # predispatch
         _pdata[4] is not None,  # news
         _pdata[5] is not None,  # fcas
+        bool(unit_events_result),     # T9 unit dispatch
+        bool(driver_events_result),   # T10 market drivers
     ]
     if include_weather:
         ok_flags.append(_pdata[_weather_idx] is not None if len(_pdata) > _weather_idx else False)
@@ -252,9 +258,11 @@ async def scatter_gather(
         news_items=news_items_result,
         weather=weather_result,
         fcas=fcas_result,
+        unit_events=unit_events_result,
+        driver_events=driver_events_result,
         commentary_context=commentary_result,
         tasks_ok=tasks_ok,
-        tasks_total=7 + (1 if include_weather else 0) + (1 if include_commentary else 0),
+        tasks_total=9 + (1 if include_weather else 0) + (1 if include_commentary else 0),
         elapsed_ms=elapsed,
         notices_stale=notices_stale,
         news_stale=news_stale,
@@ -429,6 +437,57 @@ async def _task_news_sentiment(region: str, cache: MarketCache) -> list[dict[str
         if region_l in text or region_prefix in text or "nem" in text or "aemo" in text:
             result.append(item)
     return result[:10]
+
+
+async def _task_unit_dispatch(
+    region: str,
+    dispatch: "DispatchPrice | None",
+) -> list[dict[str, Any]]:
+    """T9 — fetch DUID-level dispatch evidence for causal attribution.
+
+    Primary path: UnitDispatchEvent rows in DB (written by archive gap-fill every hour
+    and by the scheduler's live dispatch job when DISPATCHLOAD rows are parsed).
+    Fallback: bid-reconstruction from BidOffer + GeneratorUnit (works once archive
+    has seeded those tables for the region — typically within the first hour of operation).
+
+    Returns empty list (never raises) so the scatter pipeline never blocks on this.
+    """
+    if dispatch is None:
+        return []
+    try:
+        from app.engines.unit_attribution import retrieve_unit_dispatch
+        from app.db.session import db_session
+        async with db_session() as session:
+            rows = await retrieve_unit_dispatch(session, region, dispatch.valid_time)
+        return rows
+    except Exception as exc:
+        logger.debug("T9 unit dispatch task failed for %s: %s", region, exc)
+        return []
+
+
+async def _task_driver_events(
+    region: str,
+    dispatch: "DispatchPrice | None",
+) -> list[dict[str, Any]]:
+    """T10 — fetch constraint + interconnector events for causal attribution.
+
+    Queries MarketDriverEvent rows near the dispatch valid_time.
+    These are populated by the archive gap-fill job (hourly) and by the live
+    DISPATCHCONSTRAINT parsing once that is wired into the scheduler.
+    Falls back to same-hour-of-day archive proxy when live data is absent.
+    Returns empty list (never raises).
+    """
+    if dispatch is None:
+        return []
+    try:
+        from app.engines.driver_attribution import retrieve_market_drivers
+        from app.db.session import db_session
+        async with db_session() as session:
+            rows = await retrieve_market_drivers(session, region, dispatch.valid_time)
+        return rows
+    except Exception as exc:
+        logger.debug("T10 driver events task failed for %s: %s", region, exc)
+        return []
 
 
 async def _task_fcas(

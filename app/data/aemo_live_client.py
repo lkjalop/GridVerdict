@@ -68,6 +68,10 @@ class LiveMarketSnapshot:
     fetched_at: datetime
     regions: dict[str, DispatchPrice] = field(default_factory=dict)
     raw_ref: str = ""
+    # Sprint T: extended tables from the same DISPATCHIS zip
+    unit_dispatch_rows: list[dict] = field(default_factory=list)   # DISPATCHLOAD — DUID level
+    constraint_rows: list[dict] = field(default_factory=list)       # DISPATCHCONSTRAINT — binding only
+    interconnector_rows: list[dict] = field(default_factory=list)   # DISPATCHINTERCONNECTORRES
 
     def get(self, region: str) -> DispatchPrice | None:
         return self.regions.get(region.upper())
@@ -123,7 +127,13 @@ class AEMOLiveClient:
             await self._client.aclose()
 
     async def fetch_latest_snapshot(self) -> LiveMarketSnapshot:
-        """Download and parse the most recent dispatch price file."""
+        """Download and parse the most recent dispatch price file.
+
+        Also parses DISPATCHLOAD (unit-level), DISPATCHCONSTRAINT (binding constraints),
+        and DISPATCHINTERCONNECTORRES from the same zip — these populate snapshot fields
+        used by the scheduler to write causal attribution tables (UnitDispatchEvent,
+        MarketDriverEvent) without a second network round-trip.
+        """
         async with self._lock:
             client = await self._get_client()
             zip_url, zip_content = await self._fetch_latest_zip(client, _DISPATCH_DIR)
@@ -133,11 +143,29 @@ class AEMOLiveClient:
             if not prices:
                 raise RuntimeError("No dispatch prices parsed from NEMWeb zip")
             interval = max(p.valid_time for p in prices.values())
+
+            # Parse extended tables (never raises — failures produce empty lists)
+            try:
+                unit_rows = _parse_dispatch_unit_load(zip_content, raw_ref)
+            except Exception:
+                unit_rows = []
+            try:
+                constraint_rows = _parse_dispatch_constraints(zip_content, raw_ref)
+            except Exception:
+                constraint_rows = []
+            try:
+                interconnector_rows = _parse_dispatch_interconnectors(zip_content, raw_ref)
+            except Exception:
+                interconnector_rows = []
+
             return LiveMarketSnapshot(
                 interval=interval,
                 fetched_at=now,
                 regions=prices,
                 raw_ref=raw_ref,
+                unit_dispatch_rows=unit_rows,
+                constraint_rows=constraint_rows,
+                interconnector_rows=interconnector_rows,
             )
 
     async def fetch_predispatch(self) -> dict[str, list["PredispatchInterval"]]:
@@ -326,6 +354,312 @@ def _parse_dispatch_zip(content: bytes, raw_ref: str) -> dict[str, DispatchPrice
         )
 
     return prices
+
+
+def _parse_dispatch_unit_load(content: bytes, raw_ref: str) -> list[dict]:
+    """Extract DUID-level dispatch from the DISPATCH,LOAD table in a DISPATCHIS zip.
+
+    Same zip as _parse_dispatch_zip — just reads the LOAD table rows.
+    Returns one dict per DUID with: duid, region (from DISPATCHLOAD), valid_time,
+    initialmw, totalcleared, dispatchedgeneration, availability, rampdownrate, rampuprate.
+
+    Region is the CONNECTIONPOINTID prefix (e.g. "NSW1") — not always present.
+    Callers that need region-filtered rows should join against the GeneratorUnit table.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            csv_name = next((n for n in zf.namelist() if n.endswith(".CSV")), None)
+            if csv_name is None:
+                return []
+            raw_text = zf.read(csv_name).decode("utf-8", errors="replace")
+    except Exception:
+        return []
+
+    cols: dict[str, int | None] = {
+        "date": None, "duid": None, "initialmw": None, "totalcleared": None,
+        "availability": None, "rampdownrate": None, "rampuprate": None,
+        "dispatchedgeneration": None, "dispatchedload": None,
+        "semi_dispatch_cap": None, "lowerreg": None, "raisereg": None,
+    }
+
+    def _idx(name: str) -> int | None:
+        return cols.get(name)
+
+    results: list[dict] = []
+    system_time = datetime.now(timezone.utc)
+
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split(",")
+        if len(parts) < 4:
+            continue
+        row_type = parts[0].upper()
+        table = parts[2].upper() if len(parts) > 2 else ""
+
+        if row_type == "I" and table == "LOAD":
+            upper = [p.upper().strip() for p in parts]
+            for name, header in [
+                ("date",                "SETTLEMENTDATE"),
+                ("duid",                "DUID"),
+                ("initialmw",           "INITIALMW"),
+                ("totalcleared",        "TOTALCLEARED"),
+                ("availability",        "AVAILABILITY"),
+                ("rampdownrate",        "RAMPDOWNRATE"),
+                ("rampuprate",          "RAMPUPRATE"),
+                ("dispatchedgeneration","DISPATCHEDGENERATION"),
+                ("dispatchedload",      "DISPATCHEDLOAD"),
+                ("semi_dispatch_cap",   "SEMIDISPATCH"),
+                ("lowerreg",            "LOWER5MIN"),
+                ("raisereg",            "RAISE5MIN"),
+            ]:
+                cols[name] = upper.index(header) if header in upper else None
+            continue
+
+        if row_type != "D" or table != "LOAD":
+            continue
+
+        try:
+            duid_idx = _idx("duid")
+            date_idx = _idx("date")
+            if duid_idx is None or date_idx is None or len(parts) <= max(duid_idx, date_idx):
+                continue
+            duid = parts[duid_idx].strip().strip('"').upper()
+            if not duid:
+                continue
+            raw_date = parts[date_idx].strip().strip('"')
+            try:
+                valid_time = datetime.strptime(raw_date, "%Y/%m/%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+
+            def _f(name: str) -> float | None:
+                idx = _idx(name)
+                if idx is None or idx >= len(parts):
+                    return None
+                v = parts[idx].strip()
+                return float(v) if v else None
+
+            results.append({
+                "source": "DISPATCHLOAD",
+                "duid": duid,
+                "valid_time": valid_time,
+                "system_time": system_time,
+                "initialmw": _f("initialmw"),
+                "totalcleared": _f("totalcleared"),
+                "availability": _f("availability"),
+                "rampdownrate": _f("rampdownrate"),
+                "rampuprate": _f("rampuprate"),
+                "dispatchedgeneration": _f("dispatchedgeneration"),
+                "dispatchedload": _f("dispatchedload"),
+                "semi_dispatch_cap": _f("semi_dispatch_cap"),
+                "raw_ref": raw_ref,
+            })
+        except (ValueError, IndexError):
+            continue
+
+    return results
+
+
+def _parse_dispatch_constraints(content: bytes, raw_ref: str) -> list[dict]:
+    """Extract binding constraints from DISPATCH,CONSTRAINT table in a DISPATCHIS zip.
+
+    Only returns rows where MARGINALVALUE > 0 (constraint is binding).
+    Returns: constraintid, marginalvalue, violationdegree, rhs, valid_time.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            csv_name = next((n for n in zf.namelist() if n.endswith(".CSV")), None)
+            if csv_name is None:
+                return []
+            raw_text = zf.read(csv_name).decode("utf-8", errors="replace")
+    except Exception:
+        return []
+
+    cols: dict[str, int | None] = {
+        "date": None, "constraintid": None, "marginalvalue": None,
+        "violationdegree": None, "rhs": None,
+    }
+    results: list[dict] = []
+    system_time = datetime.now(timezone.utc)
+
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split(",")
+        if len(parts) < 4:
+            continue
+        row_type = parts[0].upper()
+        table = parts[2].upper() if len(parts) > 2 else ""
+
+        if row_type == "I" and table == "CONSTRAINT":
+            upper = [p.upper().strip() for p in parts]
+            for name, header in [
+                ("date",           "SETTLEMENTDATE"),
+                ("constraintid",   "CONSTRAINTID"),
+                ("marginalvalue",  "MARGINALVALUE"),
+                ("violationdegree","VIOLATIONDEGREE"),
+                ("rhs",            "RHS"),
+            ]:
+                cols[name] = upper.index(header) if header in upper else None
+            continue
+
+        if row_type != "D" or table != "CONSTRAINT":
+            continue
+
+        try:
+            cid_idx = cols.get("constraintid")
+            mv_idx  = cols.get("marginalvalue")
+            dt_idx  = cols.get("date")
+            if cid_idx is None or mv_idx is None or dt_idx is None:
+                continue
+            if max(cid_idx, mv_idx, dt_idx) >= len(parts):
+                continue
+
+            mv_str = parts[mv_idx].strip()
+            if not mv_str:
+                continue
+            marginal_value = float(mv_str)
+            if marginal_value <= 0.0:
+                continue   # non-binding — skip
+
+            constraint_id = parts[cid_idx].strip().strip('"')
+            if not constraint_id:
+                continue
+
+            raw_date = parts[dt_idx].strip().strip('"')
+            try:
+                valid_time = datetime.strptime(raw_date, "%Y/%m/%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+
+            vd_idx = cols.get("violationdegree")
+            rhs_idx = cols.get("rhs")
+            violation = float(parts[vd_idx].strip()) if vd_idx and vd_idx < len(parts) and parts[vd_idx].strip() else 0.0
+            rhs = float(parts[rhs_idx].strip()) if rhs_idx and rhs_idx < len(parts) and parts[rhs_idx].strip() else None
+
+            results.append({
+                "constraint_id": constraint_id,
+                "marginal_value": marginal_value,
+                "violation_degree": violation,
+                "rhs": rhs,
+                "valid_time": valid_time,
+                "system_time": system_time,
+                "raw_ref": raw_ref,
+                "source": "DISPATCHCONSTRAINT",
+            })
+        except (ValueError, IndexError):
+            continue
+
+    return results
+
+
+def _parse_dispatch_interconnectors(content: bytes, raw_ref: str) -> list[dict]:
+    """Extract interconnector flows from DISPATCH,INTERCONNECTORRES in a DISPATCHIS zip.
+
+    Returns all interconnectors with: id, metered_mw_flow, mw_flow, mw_losses,
+    export_limit, import_limit, violation_degree, at_export_limit, at_import_limit.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            csv_name = next((n for n in zf.namelist() if n.endswith(".CSV")), None)
+            if csv_name is None:
+                return []
+            raw_text = zf.read(csv_name).decode("utf-8", errors="replace")
+    except Exception:
+        return []
+
+    cols: dict[str, int | None] = {
+        "date": None, "interconnectorid": None, "meteredmwflow": None,
+        "mwflow": None, "mwlosses": None, "exportlimit": None,
+        "importlimit": None, "violationdegree": None,
+    }
+    results: list[dict] = []
+    system_time = datetime.now(timezone.utc)
+
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split(",")
+        if len(parts) < 4:
+            continue
+        row_type = parts[0].upper()
+        table = parts[2].upper() if len(parts) > 2 else ""
+
+        if row_type == "I" and table == "INTERCONNECTORRES":
+            upper = [p.upper().strip() for p in parts]
+            for name, header in [
+                ("date",             "SETTLEMENTDATE"),
+                ("interconnectorid", "INTERCONNECTORID"),
+                ("meteredmwflow",    "METEREDMWFLOW"),
+                ("mwflow",           "MWFLOW"),
+                ("mwlosses",         "MWLOSSES"),
+                ("exportlimit",      "EXPORTLIMIT"),
+                ("importlimit",      "IMPORTLIMIT"),
+                ("violationdegree",  "VIOLATIONDEGREE"),
+            ]:
+                cols[name] = upper.index(header) if header in upper else None
+            continue
+
+        if row_type != "D" or table != "INTERCONNECTORRES":
+            continue
+
+        try:
+            ic_idx = cols.get("interconnectorid")
+            dt_idx = cols.get("date")
+            mf_idx = cols.get("meteredmwflow")
+            if ic_idx is None or dt_idx is None or max(filter(None, [ic_idx, dt_idx])) >= len(parts):
+                continue
+
+            ic_id = parts[ic_idx].strip().strip('"').upper()
+            if not ic_id:
+                continue
+
+            raw_date = parts[dt_idx].strip().strip('"')
+            try:
+                valid_time = datetime.strptime(raw_date, "%Y/%m/%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+
+            def _f2(name: str) -> float | None:
+                idx = cols.get(name)
+                if idx is None or idx >= len(parts):
+                    return None
+                v = parts[idx].strip()
+                return float(v) if v else None
+
+            metered = _f2("meteredmwflow")
+            export_lim = _f2("exportlimit")
+            import_lim = _f2("importlimit")
+
+            results.append({
+                "interconnector_id": ic_id,
+                "metered_mw_flow": metered,
+                "mw_flow": _f2("mwflow"),
+                "mw_losses": _f2("mwlosses"),
+                "export_limit": export_lim,
+                "import_limit": import_lim,
+                "violation_degree": _f2("violationdegree") or 0.0,
+                "at_export_limit": (
+                    abs((metered or 0) - (export_lim or 0)) < 5.0
+                    if metered is not None and export_lim is not None else False
+                ),
+                "at_import_limit": (
+                    abs((metered or 0) - (import_lim or 0)) < 5.0
+                    if metered is not None and import_lim is not None else False
+                ),
+                "valid_time": valid_time,
+                "system_time": system_time,
+                "raw_ref": raw_ref,
+                "source": "DISPATCHINTERCONNECTORRES",
+            })
+        except (ValueError, IndexError):
+            continue
+
+    return results
 
 
 @dataclass

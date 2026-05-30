@@ -583,14 +583,92 @@ async def _persist_dispatch_snapshot(snapshot: Any) -> None:
                 raw_ref=dp.raw_ref,
             ))
 
+    # Sprint T: persist DUID-level unit dispatch rows from DISPATCHLOAD
+    unit_dispatch_rows_db = []
+    if getattr(snapshot, "unit_dispatch_rows", None):
+        from app.db.models import UnitDispatchEvent, GeneratorUnit
+        from sqlalchemy import select as sa_select
+        try:
+            async with db_session() as _gen_session:
+                # Load generator registry to map DUID → region + fuel_type
+                gen_result = await _gen_session.execute(sa_select(GeneratorUnit))
+                gen_registry: dict[str, "GeneratorUnit"] = {
+                    g.duid: g for g in gen_result.scalars().all()
+                }
+            for row in snapshot.unit_dispatch_rows:
+                duid = row.get("duid", "")
+                gen = gen_registry.get(duid)
+                if gen is None:
+                    continue   # skip DUIDs not in registry yet
+                unit_id = hashlib.sha256(
+                    f"ud-{duid}-{row['valid_time'].isoformat()}".encode()
+                ).hexdigest()[:36]
+                unit_dispatch_rows_db.append(UnitDispatchEvent(
+                    id=unit_id,
+                    source="DISPATCHLOAD",
+                    duid=duid,
+                    station_name=gen.station_name,
+                    participant=gen.participant,
+                    region=gen.region,
+                    fuel_type=gen.fuel_type,
+                    valid_time=row["valid_time"],
+                    system_time=row["system_time"],
+                    initial_mw=row.get("initialmw"),
+                    total_cleared_mw=row.get("totalcleared"),
+                    availability_mw=row.get("availability"),
+                    ramp_rate=row.get("rampdownrate"),  # store downramp as ramp_rate
+                    semi_dispatch_cap=row.get("semi_dispatch_cap"),
+                    raw_ref=row.get("raw_ref", snapshot.raw_ref)[:100],
+                    data={
+                        "rampuprate": row.get("rampuprate"),
+                        "dispatchedgeneration": row.get("dispatchedgeneration"),
+                        "dispatchedload": row.get("dispatchedload"),
+                    },
+                ))
+        except Exception as _unit_exc:
+            logger.debug("Unit dispatch row building failed (non-fatal): %s", _unit_exc)
+            unit_dispatch_rows_db = []
+
+    # Sprint T: persist binding constraints from DISPATCHCONSTRAINT
+    constraint_rows_db = []
+    if getattr(snapshot, "constraint_rows", None):
+        from app.db.models import MarketDriverEvent
+        for crow in snapshot.constraint_rows:
+            cid = crow["constraint_id"]
+            c_id = hashlib.sha256(
+                f"dc-{cid}-{crow['valid_time'].isoformat()}".encode()
+            ).hexdigest()[:36]
+            constraint_rows_db.append(MarketDriverEvent(
+                id=c_id,
+                source="DISPATCHCONSTRAINT",
+                driver_type="constraint",
+                element_id=cid,
+                region=None,   # constraints span regions — filter by element_id prefix
+                valid_time=crow["valid_time"],
+                system_time=crow["system_time"],
+                values={
+                    "marginal_value": crow["marginal_value"],
+                    "violation_degree": crow["violation_degree"],
+                    "rhs": crow.get("rhs"),
+                },
+                raw_ref=crow.get("raw_ref", snapshot.raw_ref)[:100],
+            ))
+
     try:
         async with db_session() as session:
             for row in rows:
                 await session.merge(row)
             for row in fcas_rows:
                 await session.merge(row)
+            for row in unit_dispatch_rows_db:
+                await session.merge(row)
+            for row in constraint_rows_db:
+                await session.merge(row)
             await session.commit()
-        logger.debug("Dispatch persisted: %d rows, %d FCAS rows", len(rows), len(fcas_rows))
+        logger.debug(
+            "Dispatch persisted: %d price, %d FCAS, %d unit, %d constraint rows",
+            len(rows), len(fcas_rows), len(unit_dispatch_rows_db), len(constraint_rows_db),
+        )
     except Exception as exc:
         logger.warning("Dispatch persistence failed (non-fatal): %s", exc)
 

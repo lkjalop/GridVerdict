@@ -74,19 +74,41 @@ async def get_fuel_mix(
     region: str,
     session: Any = None,
     weather: dict[str, Any] | None = None,
+    unit_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return per-fuel-type capacity mix, price context, and a source recommendation.
 
-    Falls back gracefully through three data tiers:
-      tier 1 — unit dispatch events (DISPATCH_UNIT_SOLUTION)
+    Falls back gracefully through four data tiers:
+      tier 0 — scatter_gather unit_events (T9 result, live dispatch — highest quality)
+      tier 1 — unit dispatch events queried from DB (DISPATCH_UNIT_SOLUTION archive)
       tier 2 — generator unit metadata + current spot price
       tier 3 — static priors only
+
+    unit_events: pre-fetched T9 scatter result (avoids a second DB query when scatter
+                 already ran retrieve_unit_dispatch for the same interval).
     """
     region = region.upper()
     now = datetime.now(timezone.utc)
 
-    # Try tier 1: real dispatch output by fuel type
-    unit_mix = await _from_unit_dispatch(region, session, now)
+    # Tier 0: use pre-fetched scatter unit_events when provided (avoids second DB query)
+    unit_mix: dict[str, Any] = {}
+    if unit_events:
+        try:
+            from app.engines.marginal_setter import fuel_mix_from_dispatch
+            _dispatch_data = fuel_mix_from_dispatch(unit_events)
+            if _dispatch_data.get("by_fuel"):
+                # Convert marginal_setter format to fuel_mix format
+                for fuel, bucket in _dispatch_data["by_fuel"].items():
+                    dispatched_mw = bucket.get("total_cleared_mw", 0.0)
+                    if dispatched_mw > 0:
+                        unit_mix[fuel] = {"mw": dispatched_mw}
+        except Exception as _exc:
+            logger.debug("Tier-0 fuel mix from scatter unit_events failed: %s", _exc)
+
+    if not unit_mix:
+        # Tier 1: query DB for unit dispatch events
+        unit_mix = await _from_unit_dispatch(region, session, now)
+
     # Try tier 2: generator capacity metadata
     capacity_mix = await _from_generator_units(region, session)
     # Current spot price for context
