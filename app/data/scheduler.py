@@ -251,6 +251,19 @@ async def _start_jobs() -> None:
             max_instances=1,
             coalesce=True,
         )
+    # Monthly MMSDM refresh — runs on the 20th of each month at 03:00 UTC
+    # Downloads the previous month's MMSDM archive and retrains LNN.
+    # 20th gives AEMO ~20 days after month-end to publish files (they typically publish in ~14 days).
+    from apscheduler.triggers.cron import CronTrigger
+    sched.add_job(
+        _job_mmsdm_monthly_refresh,
+        trigger=CronTrigger(day=20, hour=3, minute=0, timezone="UTC"),
+        id="mmsdm_monthly_refresh",
+        name="AEMO MMSDM previous-month archive refresh + LNN retrain",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
     sched.add_job(
         _job_predispatch_refresh,
         trigger=IntervalTrigger(minutes=30),
@@ -410,15 +423,22 @@ async def _job_dispatch_refresh() -> None:
         # Persist to DB — idempotent on repeated calls for same interval
         await _persist_dispatch_snapshot(snapshot)
 
-        # Feed LNN trainer buffer
+        # Feed LNN trainer buffer — pass enriched interval dict so v2 features fire
         from app.engines.forecasting.inference import feed_interval
         for region_code, dp in snapshot.regions.items():
+            _fcas = getattr(dp, "fcas_prices", None) or {}
             feed_interval(region_code, {
                 "region": region_code,
                 "price_rrp": dp.price_rrp,
                 "demand_mw": dp.demand_mw,
                 "availability_mw": dp.availability_mw,
                 "valid_time": dp.valid_time.isoformat(),
+                # v2 enriched features — 0.0 / None gracefully handled by _extract_features
+                "fcas_raise_6s": _fcas.get("raise6sec"),
+                # renewable_pct and constraint_count are filled by the scheduler's
+                # driver pipeline below; set to None here (resolved post-persist)
+                "renewable_pct": None,
+                "constraint_count": None,
             })
 
         # Feed ChronoGraph RegimeClassifier (t-digest + ADWIN) for live percentile ranking
@@ -886,6 +906,51 @@ async def _job_mmsdm_bulk_backfill() -> None:
         logger.debug("MMSDM bulk backfill failed (non-fatal): %s", exc)
 
 
+async def _job_mmsdm_monthly_refresh() -> None:
+    """Ingest the previous calendar month's MMSDM archive on the 20th of each month.
+
+    AEMO publishes MMSDM monthly ZIP files ~2 weeks after month end.
+    Running on the 20th ensures the previous month's data is available.
+    This keeps the DB current automatically — no manual backfills needed.
+
+    After ingestion, triggers an LNN retrain so models benefit from new data.
+    """
+    _job_enter("mmsdm_monthly_refresh")
+    try:
+        from datetime import timedelta
+        from app.mcp.aemo_archive import backfill_mmsdm_archive
+        from app.db.session import db_session
+
+        # Target: first day of the previous month
+        today = datetime.now(timezone.utc)
+        first_this_month = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        last_month_end = first_this_month - timedelta(seconds=1)
+        last_month_start = last_month_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        tables = [t.strip() for t in _settings.backfill_tables.split(",") if t.strip()]
+        counts = await backfill_mmsdm_archive(
+            db_session_factory=db_session,
+            start_date=last_month_start,
+            end_date=last_month_end,
+            max_files=None,
+            tables=tables,
+        )
+        logger.info(
+            "MMSDM monthly refresh (%s): %d files ok / %d failed / %d price rows",
+            last_month_start.strftime("%Y-%m"),
+            counts["files_ok"], counts["files_failed"], counts["price_rows"],
+        )
+        # Trigger LNN retrain so models incorporate the new month's data
+        if counts["price_rows"] > 0:
+            await _job_lnn_retrain()
+        _record_success("mmsdm_monthly_refresh")
+    except Exception as exc:
+        _record_failure("mmsdm_monthly_refresh", exc)
+        logger.warning("MMSDM monthly refresh failed: %s", exc)
+    finally:
+        _job_exit("mmsdm_monthly_refresh")
+
+
 async def _job_commentary_cleanup() -> None:
     """Prune commentary_events older than 7 days to control table size."""
     _job_enter("commentary_cleanup")
@@ -980,6 +1045,7 @@ async def _calibrate_region(region: str) -> dict | None:
                 "skill_vs_aemo_predispatch": round(score.skill_vs.get("aemo_predispatch", 0.0), 4),
                 "n_origins": report.n_origins,
                 "horizon_min": report.horizon_min,
+                "per_regime": [r.to_dict() for r in (score.per_regime or [])],
             }
             calibration_rows.append(row)
 

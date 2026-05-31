@@ -1257,12 +1257,22 @@ def _parse_archive_dt(value: str) -> datetime:
     return _parse_aemo_dt(value.strip().replace('"', ""))
 
 
-# AEMO uses abbreviated names in MMSDM DVD filenames for some tables.
+# AEMO uses abbreviated names in MMSDM DVD filenames for some tables (pre-2024-08).
 _TABLE_FILENAME_ALIASES: dict[str, list[str]] = {
     # DISPATCH_UNIT_SOLUTION is shortened in older DVD exports
     "DISPATCH_UNIT_SOLUTION": ["DISPATCH_UNIT_SOLUTION", "DISPATCH_UNIT_SOLN"],
     # BIDPEROFFER is split across two files (large table)
     "BIDPEROFFER": ["BIDPEROFFER1", "BIDPEROFFER2"],
+}
+
+# AEMO switched from PUBLIC_DVD_* to PUBLIC_ARCHIVE#*#FILE01#* naming in August 2024.
+# The # is double-percent-encoded (%2523) because the filenames use literal # characters.
+_ARCHIVE_FORMAT_START = datetime(2024, 8, 1, tzinfo=timezone.utc)
+
+# Table name changes in the ARCHIVE format (2024-08+).
+_TABLE_ARCHIVE_ALIASES: dict[str, list[str]] = {
+    # BIDPEROFFER1/2 (DVD split) → BIDOFFERPERIOD (single ARCHIVE file)
+    "BIDPEROFFER": ["BIDOFFERPERIOD"],
 }
 
 
@@ -1276,16 +1286,27 @@ def _candidate_mmsdm_urls(
         yyyy = month.strftime("%Y")
         mm = month.strftime("%m")
         yyyymm = month.strftime("%Y%m")
-        for table in tables:
-            # Try all known filename variants for this table
-            file_variants = _TABLE_FILENAME_ALIASES.get(table, [table])
-            for variant in file_variants:
-                filename = f"PUBLIC_DVD_{variant}_{yyyymm}010000.zip"
-                urls.extend([
-                    f"{_MMSDM_ARCHIVE_DIR}{yyyy}/MMSDM_{yyyy}_{mm}/MMSDM_Historical_Data_SQLLoader/DATA/{filename}",
-                    f"{_MMSDM_ARCHIVE_DIR}{yyyy}/MMSDM_{yyyy}_{mm}/{filename}",
-                    f"{_MMSDM_ARCHIVE_DIR}{yyyy}/{filename}",
-                ])
+        data_base = (
+            f"{_MMSDM_ARCHIVE_DIR}{yyyy}/MMSDM_{yyyy}_{mm}"
+            f"/MMSDM_Historical_Data_SQLLoader/DATA/"
+        )
+        if month >= _ARCHIVE_FORMAT_START:
+            # New format: PUBLIC_ARCHIVE%2523{TABLE}%2523FILE01%2523{YYYYMM}010000.zip
+            for table in tables:
+                for variant in _TABLE_ARCHIVE_ALIASES.get(table, [table]):
+                    urls.append(
+                        f"{data_base}PUBLIC_ARCHIVE%2523{variant}%2523FILE01%2523{yyyymm}010000.zip"
+                    )
+        else:
+            # Old format: PUBLIC_DVD_{TABLE}_{YYYYMM}010000.zip
+            for table in tables:
+                for variant in _TABLE_FILENAME_ALIASES.get(table, [table]):
+                    filename = f"PUBLIC_DVD_{variant}_{yyyymm}010000.zip"
+                    urls.extend([
+                        f"{data_base}{filename}",
+                        f"{_MMSDM_ARCHIVE_DIR}{yyyy}/MMSDM_{yyyy}_{mm}/{filename}",
+                        f"{_MMSDM_ARCHIVE_DIR}{yyyy}/{filename}",
+                    ])
     return urls
 
 
@@ -1461,6 +1482,9 @@ def _identify_gaps(existing: set[datetime], cutoff: datetime) -> list[datetime]:
 
 
 _BULK_BATCH = 2000   # rows per INSERT statement
+# asyncpg hard limit: 32767 placeholders per statement.
+# BidOffer has 17 columns → max 1927 rows per batch.
+_BID_BULK_BATCH = 32767 // 17  # 1927
 
 
 def _bulk_insert_stmt(model, rows: list[dict[str, Any]], on_conflict: str = "nothing"):
@@ -1579,11 +1603,12 @@ async def _upsert_bid_rows(session, rows: list[dict[str, Any]]) -> None:
     from app.db.models import BidOffer
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    for i in range(0, len(rows), _BULK_BATCH):
-        batch = rows[i: i + _BULK_BATCH]
-        stmt = pg_insert(BidOffer).values(batch).on_conflict_do_nothing(
-            index_elements=["source", "duid", "bid_type", "settlement_date", "period_id"]
-        )
+    for i in range(0, len(rows), _BID_BULK_BATCH):
+        batch = rows[i: i + _BID_BULK_BATCH]
+        # on_conflict_do_nothing() without index_elements generates bare
+        # ON CONFLICT DO NOTHING — catches both PK and composite-index conflicts
+        # (needed for retries where partial rows from a failed run already exist)
+        stmt = pg_insert(BidOffer).values(batch).on_conflict_do_nothing()
         await session.execute(stmt)
 
 
