@@ -404,6 +404,17 @@ def _classify_sub_questions(lower: str, requested_output: str) -> list[dict]:
         if phrase in lower:
             questions.append({"type": "historical_price_distribution", "period": period})
             break
+    # Specific past year/month → upgrade to full-archive lookback so backfilled data is reachable
+    if re.search(r'\b20(1[5-9]|2[0-5])\b', lower):
+        _existing_dist = next(
+            (q for q in questions if q.get("type") == "historical_price_distribution"), None
+        )
+        if _existing_dist:
+            # Upgrade any shorter period to all_time when a specific past year is present
+            if _existing_dist.get("period") not in ("all_time", "multi_year"):
+                _existing_dist["period"] = "all_time"
+        else:
+            questions.append({"type": "historical_price_distribution", "period": "all_time"})
 
     # Fuel source comparison
     fuels_mentioned = [f for f in ["coal", "solar", "hydro", "wind", "gas", "battery"] if f in lower]
@@ -1077,10 +1088,13 @@ def _decompose_rules(
 
     # Past calendar year reference — "june 2024", "prices in 2023", "Q3 2022"
     # Catches cases where year and month are separated ("in june 2024" ≠ "in 2024")
-    if intent == IntentLabel.LOOKUP and re.search(r'\b20(1[5-9]|2[0-4])\b', lower):
-        intent = IntentLabel.RETROSPECTIVE
+    _has_past_year_ref = bool(re.search(r'\b20(1[5-9]|2[0-5])\b', lower))
+    requires_history = False  # initialised here; |= below preserves year-detection True
+    if _has_past_year_ref:
         requires_history = True
-        confidence = max(confidence, 0.75)
+        if intent == IntentLabel.LOOKUP:
+            intent = IntentLabel.RETROSPECTIVE
+            confidence = max(confidence, 0.75)
 
     # Price threshold extraction — "$150", "below $200", "above $300", "P90", "under $100"
     import re as _re
@@ -1103,7 +1117,8 @@ def _decompose_rules(
     _pct_refs = _re.findall(r'\b[Pp](\d+)\b|\b(\d+)(?:th|rd|nd|st)\s+percentile', text)
     price_percentiles = [int(p[0] or p[1]) for p in _pct_refs if int(p[0] or p[1]) <= 99]
 
-    requires_history = any(w in lower for w in [
+    # Use |= so year-detection at line 1080 is not overwritten
+    requires_history |= any(w in lower for w in [
         "historical", "last", "yesterday", "when", "previous", "analogs",
         "happened before", "similar", "what happened afterwards",
         "fluctuate", "fluctuation", "back down", "moved from", "price path",

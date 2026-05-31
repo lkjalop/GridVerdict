@@ -25,7 +25,9 @@ _PERIOD_DAYS: dict[str, int] = {
     "last_quarter": 90,
     "last_month": 30,
     "last_week": 7,
-    "historical": 365,
+    "historical": 1460,   # 4 years — covers full MMSDM archive
+    "all_time": 1460,     # explicit alias for full-archive queries
+    "multi_year": 730,    # 2 years for "how have prices changed recently"
 }
 
 _DEFAULT_DAYS = 365
@@ -63,7 +65,9 @@ async def get_historical_price_distribution(
         "last_quarter": "last 90 days",
         "last_month": "last 30 days",
         "last_week": "last 7 days",
-        "historical": "available history",
+        "historical": "available history (4 years)",
+        "all_time": "available history (4 years)",
+        "multi_year": "last 2 years",
     }.get(period, "historical")
 
     try:
