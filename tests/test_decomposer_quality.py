@@ -297,13 +297,83 @@ def test_rule_based_mixed_state_comparison_and_source_recommendation():
 
 @pytest.mark.parametrize("query", [
     "What about Darwin price?",
-    "What about Perth SWIS price?",
-    "Is Broome covered?",
 ])
 def test_rule_based_non_nem_locations_are_out_of_scope(query: str):
     result = _decompose_rules(query, "NSW1", None)
     assert result.intent == IntentLabel.OUT_OF_SCOPE
     assert result.clarifying_question
+
+
+@pytest.mark.parametrize("query,market", [
+    ("What about Perth SWIS price?", "WA_WEM"),
+    ("Is Broome covered?", "WA_WEM"),
+    ("How does New Zealand electricity compare to the NEM?", "NZ_GRID"),
+])
+def test_rule_based_non_nem_markets_redirect_with_boundary(query: str, market: str):
+    result = _decompose_rules(query, "NSW1", None)
+    assert result.intent == IntentLabel.GEOGRAPHIC_REDIRECT
+    assert result.requested_output == "geographic_redirect"
+    assert result.geographic_market == market
+    assert result.adjacent_context
+
+
+@pytest.mark.parametrize("query,expected_intent,requested", [
+    (
+        "Should I install rooftop solar on my house in NSW, will feed-in tariffs make money?",
+        IntentLabel.PARTIAL_SCOPE,
+        "solar_household_context",
+    ),
+    (
+        "I am thinking of buying a wind and solar farm in NSW. What do I need to know about prices?",
+        IntentLabel.PARTIAL_SCOPE,
+        "renewable_investment_price_context",
+    ),
+    # Coal policy and budget still go through EVIDENCE_BRIDGE (no "how does X affect" phrasing)
+    (
+        "Will government coal policy affect NEM electricity prices?",
+        IntentLabel.EVIDENCE_BRIDGE,
+        "policy_evidence_bridge",
+    ),
+    (
+        "What does the federal budget energy spending mean for NEM prices?",
+        IntentLabel.EVIDENCE_BRIDGE,
+        "fiscal_budget_bridge",
+    ),
+])
+def test_rule_based_adjacent_query_taxonomy(query: str, expected_intent: IntentLabel, requested: str):
+    result = _decompose_rules(query, "NSW1", None)
+    assert result.intent == expected_intent
+    assert result.requested_output == requested
+    assert result.adjacent_context
+
+
+@pytest.mark.parametrize("query,expected_requested", [
+    # "How does/do X affect Y?" → EXPLANATION (causal mechanism, fully in NEM scope)
+    # These were previously EVIDENCE_BRIDGE but the user rightly called that out as wrong.
+    # Interest rates and LNG price effects on NEM are fully explainable from NEM data.
+    ("How do interest rates affect renewable electricity prices in the NEM?", "causal_explanation"),
+    ("How does LNG and domestic gas price affect NEM electricity prices?", "gas_electricity_nexus"),
+    ("How does weather affect electricity demand in NSW?", "causal_explanation"),
+    ("How does coal retirement affect NEM prices?", "causal_explanation"),
+])
+def test_causal_how_routes_to_explanation(query: str, expected_requested: str):
+    """'How does X affect Y?' must route to EXPLANATION, not EVIDENCE_BRIDGE.
+
+    This was a user-reported bug (screenshot 018): interest-rate mechanism
+    questions showed PARTIAL_SCOPE when the content is fully answerable.
+    The _causal_how detector intercepts before the adjacent classifier fires.
+    """
+    result = _decompose_rules(query, "NSW1", None)
+    assert result.intent == IntentLabel.EXPLANATION, (
+        f"Expected EXPLANATION for causal-how query, got {result.intent.value!r}"
+    )
+    assert result.requested_output == expected_requested
+    assert result.adjacent_context is None  # goes through normal NEM pipeline
+
+
+def test_rule_based_pure_investment_appraisal_remains_out_of_scope():
+    result = _decompose_rules("Give me the LCOE and 20-year IRR for a new solar farm", "NSW1", None)
+    assert result.intent == IntentLabel.OUT_OF_SCOPE
 
 
 @pytest.mark.parametrize("query,expected_intent", [

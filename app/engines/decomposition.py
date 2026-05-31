@@ -473,10 +473,14 @@ def _decompose_rules(
     text: str, region_hint: str, query_id: str | None
 ) -> QueryDecomposition:
     """Rule-based intent classifier — deterministic, no LLM dependency."""
-    # Strip restatement seed prefix — intent classification must use original text only.
-    # The seed (e.g. "[The user is asking: ...]") can inject action/fuel keywords that
-    # confuse keyword-based intent rules. Keep full text for region/entity extraction.
-    _seed_prefix_re = re.compile(r"^\[the user is asking:.*?\]\s*", re.IGNORECASE | re.DOTALL)
+    # Strip all known prefixes that inject context keywords into routing.
+    # Session carry-forward format: "[Session context: Q1: ...] [Current question]: raw"
+    # Restatement seed format:      "[The user is asking: ...]"
+    _seed_prefix_re = re.compile(
+        r"^\[(?:the user is asking|session context)[^\]]*\]\s*"
+        r"(?:\[current question\]:\s*)?",
+        re.IGNORECASE | re.DOTALL,
+    )
     _clean_text = _seed_prefix_re.sub("", text)
     lower = _clean_text.lower()
 
@@ -597,13 +601,18 @@ def _decompose_rules(
         "over the past", "how much has", "how have", "how has",
         "average price", "average prices", "average spot",
     ]):
-        intent = IntentLabel.RETROSPECTIVE
-        confidence = 0.80
+        # Regional comparison overrides retrospective when multi-region is clear
+        if _asks_for_regional_comparison(lower):
+            intent = IntentLabel.COMPARISON
+            confidence = 0.78
+        else:
+            intent = IntentLabel.RETROSPECTIVE
+            confidence = 0.80
     elif any(w in lower for w in [
         "compare", "versus", "vs", "difference between",
         "differ to", "differ from", "different to", "different from",
         "how does", "how do",
-    ]) and any(w in lower for w in ["state", "region", "other", "compare"]):
+    ]) and (any(w in lower for w in ["state", "region", "other", "compare"]) or _asks_for_regional_comparison(lower)):
         intent = IntentLabel.COMPARISON
         confidence = 0.78
     elif any(w in lower for w in ["compare", "versus", "vs", "difference between"]):
@@ -1171,12 +1180,13 @@ def _asks_for_regional_comparison(lower: str) -> bool:
             "compare", "versus", "vs", "difference between",
             "cheaper", "cheaper than", "more expensive", "pricier",
             "higher than", "lower than", "higher priced", "lower priced",
+            "differ", "different", "how does", "how do",
         ]
     )
     if not _has_compare_verb:
         return False
-    # Catches "compare NSW and QLD" — two or more region codes present counts as regional
-    _REGION_CODES = ["nsw", "vic", "qld", "sa1", "tas", " sa "]
+    # Catches "compare NSW and QLD" — two or more region codes (with or without "1") counts as regional
+    _REGION_CODES = ["nsw1", "vic1", "qld1", "sa1", "tas1", "nsw", "vic", "qld", " sa ", "tas"]
     _region_hits = sum(1 for code in _REGION_CODES if code in lower)
     if _region_hits >= 2:
         return True
@@ -1272,6 +1282,9 @@ def _requested_output_for(
         "peak vs off-peak", "morning peak", "evening peak", "solar window",
         "price throughout the day", "by hour", "hourly pattern",
         "intraday pattern", "typical day", "across the day",
+        "cheapest time", "cheapest hour", "cheapest part of",
+        "best time to buy", "best time to purchase", "when is electricity cheapest",
+        "when to buy power", "cheapest time of day",
     ])
     if _is_diurnal_out:
         return "diurnal_analysis"
@@ -1306,7 +1319,13 @@ def _requested_output_for(
         phrase in lower
         for phrase in ["which source", "what source", "source is normally", "normally cheaper"]
     )
-    if (fuel_specific and fuel_question) or generic_source_question:
+    # Generic "which energy/power source" without naming a specific fuel
+    _generic_fuel_question = any(w in lower for w in [
+        "energy source", "power source", "electricity source", "generation source",
+        "cheapest source", "cheapest energy", "best energy", "which source",
+        "which energy", "which power",
+    ])
+    if (fuel_specific and fuel_question) or generic_source_question or _generic_fuel_question:
         return "fuel_source_recommendation"
     if intent == IntentLabel.ACTION_RECOMMENDATION:
         return "portfolio_action"
@@ -1323,6 +1342,13 @@ def _requested_output_for(
         re.search(r"\bhow\s+do(?:es)?\b|\bhow\s+w(?:ill|ould)\b", lower)
         and re.search(r"\b(affect|impact|influence|drive|alter|shape|change)\b", lower)
     )
+    # Gas/LNG mechanism — wins over generic causal_how because the nexus is a named adjacent handler
+    _is_gas_mechanism = any(w in lower for w in [
+        "lng", "gas price", "wallumbilla", "gas market", "domestic gas", "gas cost",
+        "gas affects", "gas impact", "lng price",
+    ])
+    if _is_gas_mechanism:
+        return "gas_electricity_nexus"
     # Causal mechanism queries win over weather/notice/news (user asks about mechanism, not sources)
     if _is_causal_how and requires_why and requires_forecast:
         return "causal_explanation_with_forecast"
@@ -1336,6 +1362,16 @@ def _requested_output_for(
     if requires_why and requires_forecast:
         return "causal_explanation_with_forecast"
     if requires_why:
+        return "causal_explanation"
+    # Government policy — route to policy bridge even for LOOKUP intent
+    _is_policy = any(w in lower for w in [
+        "government policy", "energy policy", "renewable policy", "climate policy",
+        "legislation", "policy", "regulation", "scheme", "capacity investment",
+    ]) and any(w in lower for w in ["government", "federal", "state", "policy", "minister"])
+    if _is_policy:
+        return "policy_evidence_bridge"
+    # Sustainability / persistence — what keeps price at this level?
+    if any(w in lower for w in ["sustainable", "can this last", "will this hold", "how long will"]):
         return "causal_explanation"
     # FY / fiscal year future queries
     _fy_out = bool(re.search(r'\bfy\s*20(2[5-9]|3\d)\b', lower, re.IGNORECASE)) or any(w in lower for w in [
