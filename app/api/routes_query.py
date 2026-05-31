@@ -1017,14 +1017,15 @@ async def submit_query(
             ),
         )
     except Exception as exc:
-        logger.debug("Answer planner unavailable for %s: %s", query_id, exc)
+        # WARNING not debug — a planner failure produces wrong answers, not just missing enrichment
+        logger.warning("Answer planner failed for %s (%s): %s", query_id, type(exc).__name__, exc)
 
     # Sprint U: per-sub-question confidence — weakest sub-question drives headline
     try:
         from app.agents.answer_planner import apply_sub_question_scores
         factual = apply_sub_question_scores(factual, why_sources)
     except Exception as exc:
-        logger.debug("Sub-question scoring failed (non-fatal): %s", exc)
+        logger.warning("Sub-question scoring failed for %s: %s", query_id, exc)
     _events.append({
         "step": "ANSWER_PLAN",
         "t_ms": round((time.perf_counter() - _t0) * 1000),
@@ -1078,7 +1079,7 @@ async def submit_query(
                 )
                 decomp = _patched_decomp
             except Exception as exc:
-                logger.debug("Critic re-plan failed (non-fatal, keeping original): %s", exc)
+                logger.warning("Critic re-plan failed (%s): %s", type(exc).__name__, exc)
         _events.append({
             "step": "COVERAGE_AUDIT",
             "t_ms": round((time.perf_counter() - _t0) * 1000),
