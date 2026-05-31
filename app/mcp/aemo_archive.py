@@ -770,7 +770,7 @@ def _parse_mmsdm_fcas_text(text: str, raw_ref: str) -> list[dict[str, Any]]:
                 continue
 
             rows.append({
-                "id": f"fcas-{raw_ref}-{region}-{valid_time.strftime('%Y%m%d%H%M')}",
+                "id": hashlib.sha256(f"fcas|{region}|{valid_time.isoformat()}".encode()).hexdigest()[:32],
                 "tenant_id": "system",
                 "source": "AEMO_DISPATCH_PRICE",
                 "region": region,
