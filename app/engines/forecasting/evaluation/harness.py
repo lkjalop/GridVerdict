@@ -11,12 +11,58 @@ from typing import Sequence
 
 import numpy as np
 
-from ..types import BacktestReport, ModelScore, QuantileForecast
+from ..types import BacktestReport, ModelScore, QuantileForecast, RegimeScore
 from ..models.base import ForecastModel
 from .calibration import calibration_error, empirical_coverage
 from .metrics import crps_from_quantiles, pinball_loss, skill_score
 from .spike_metrics import spike_scores
 from .walk_forward import walk_forward_splits
+
+# NEM price regime thresholds ($/MWh) used for stratified evaluation.
+# Mirrors domain.nem.adapter but kept here to avoid circular imports.
+_REGIME_THRESHOLDS_DEFAULT = {
+    "normal":   (float("-inf"), 100.0),
+    "elevated": (100.0,  300.0),
+    "spike":    (300.0, 1000.0),
+    "extreme":  (1000.0, float("inf")),
+}
+
+
+def _classify_regime(price: float, thresholds: dict[str, tuple] | None = None) -> str:
+    t = thresholds or _REGIME_THRESHOLDS_DEFAULT
+    for regime, (lo, hi) in t.items():
+        if lo <= price < hi:
+            return regime
+    return "normal"
+
+
+def _score_regime_slice(
+    fc: QuantileForecast,
+    ys: np.ndarray,
+    mask: np.ndarray,
+    regime: str,
+    spike_threshold: float,
+) -> RegimeScore | None:
+    """Score a model on the subset of intervals belonging to one regime."""
+    n = int(mask.sum())
+    if n == 0:
+        return None
+    fc_slice = QuantileForecast(
+        target_times=[fc.target_times[i] for i in range(len(fc.target_times)) if mask[i]],
+        quantiles=fc.quantiles,
+        values=fc.values[mask],
+    )
+    ys_slice = ys[mask]
+    _, rec, _ = spike_scores(fc_slice, ys_slice, spike_threshold)
+    cov = empirical_coverage(fc_slice, ys_slice)
+    return RegimeScore(
+        regime=regime,
+        n_intervals=n,
+        crps=crps_from_quantiles(fc_slice, ys_slice),
+        pinball=pinball_loss(fc_slice, ys_slice),
+        spike_recall=rec,
+        calibration_error=calibration_error(cov),
+    )
 
 # In-process registry: region -> list[dict] calibration result (set by run_backtest callers)
 _eval_registry: dict[str, list[dict]] = {}
@@ -118,13 +164,20 @@ def run_backtest(
         cov = empirical_coverage(fc, ys)
         prec, rec, f1 = spike_scores(fc, ys, spike_threshold)
 
-        # Skill vs every OTHER model that is a baseline
-        # Positive skill => this model beats the baseline
         skill = {
             base: skill_score(raw_crps[name], raw_crps[base])
             for base in baseline_names
             if base != name and base in raw_crps
         }
+
+        # Per-regime stratified scoring
+        regime_labels = np.array([_classify_regime(float(p)) for p in ys])
+        per_regime: list[RegimeScore] = []
+        for regime in ("normal", "elevated", "spike", "extreme"):
+            mask = regime_labels == regime
+            rs = _score_regime_slice(fc, ys, mask, regime, spike_threshold)
+            if rs is not None:
+                per_regime.append(rs)
 
         scores.append(ModelScore(
             model_name=name,
@@ -138,6 +191,7 @@ def run_backtest(
             p90_exceedance_rate=_exceedance_rate(fc, ys, 0.9),
             coverage=cov,
             skill_vs=skill,
+            per_regime=per_regime,
         ))
 
     return BacktestReport(

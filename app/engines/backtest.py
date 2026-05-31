@@ -230,7 +230,42 @@ async def _fetch_history(
             total = float(rr[2]) if rr[2] else 0.0
             ren_by_time[vt] = float(rr[1]) / total if total > 0 else 0.0
 
-        series = [_row_to_series_dict(r, region, pd_by_rounded, ren_by_time) for r in rows]
+        # Historical weather — fetched separately so failures don't break price data
+        # (WEATHER_HISTORY rows are optional; absence gracefully degrades to temp_c=0)
+        weather_by_hour: dict[datetime, tuple[float, float, float]] = {}
+        try:
+            from app.db.session import db_session as _wx_session_factory
+            async with _wx_session_factory() as wx_session:
+                wx_result = await wx_session.execute(
+                    text("""
+                        SELECT
+                            date_trunc('hour', valid_time) AS hour_bucket,
+                            AVG(price_rrp)       AS temp_c,
+                            AVG(demand_mw)       AS wind_kmh,
+                            AVG(availability_mw) AS cloud_frac
+                        FROM market_events
+                        WHERE region = :region
+                          AND source = 'WEATHER_HISTORY'
+                          AND valid_time >= :cutoff
+                          AND valid_time <= :anchor
+                        GROUP BY date_trunc('hour', valid_time)
+                        ORDER BY hour_bucket
+                    """),
+                    {"region": region, "cutoff": cutoff, "anchor": anchor},
+                )
+                for wr in wx_result.fetchall():
+                    bucket = wr[0] if isinstance(wr[0], datetime) else datetime.fromisoformat(str(wr[0]))
+                    if not bucket.tzinfo:
+                        bucket = bucket.replace(tzinfo=timezone.utc)
+                    weather_by_hour[bucket] = (
+                        float(wr[1]) if wr[1] is not None else 0.0,
+                        float(wr[2]) if wr[2] is not None else 0.0,
+                        float(wr[3]) if wr[3] is not None else 0.0,
+                    )
+        except Exception as wx_err:
+            logger.debug("WEATHER_HISTORY fetch skipped (non-fatal): %s", wx_err)
+
+        series = [_row_to_series_dict(r, region, pd_by_rounded, ren_by_time, weather_by_hour) for r in rows]
         _fill_derived_features(series)
         return series
     except Exception as exc:
@@ -245,6 +280,7 @@ def _row_to_series_dict(
     region: str,
     pd_lookup: dict[datetime, float] | None = None,
     ren_lookup: dict[datetime, float] | None = None,
+    weather_by_hour: dict[datetime, tuple[float, float, float]] | None = None,
 ) -> dict[str, Any]:
     vt = row[0]
     if not isinstance(vt, datetime):
@@ -254,21 +290,28 @@ def _row_to_series_dict(
     avail = float(row[3]) if row[3] else 0.0
 
     # Look up real predispatch RRP: round valid_time to nearest 30-min boundary.
-    # Use None as sentinel for rows without real PD — post-processed by
-    # _fill_derived_features into a non-leaking 30-min lag proxy.
     aemo_pd: float | None = None
     if pd_lookup:
         mins = vt.minute
         rounded_min = 0 if mins < 30 else 30
         pd_key = vt.replace(minute=rounded_min, second=0, microsecond=0)
-        aemo_pd = pd_lookup.get(pd_key)  # None if key absent
+        aemo_pd = pd_lookup.get(pd_key)
 
-    # Renewable fraction from unit_dispatch_events, or 0.0 when not available.
     ren_frac = ren_lookup.get(vt, 0.0) if ren_lookup else 0.0
 
-    # Interconnector headroom proxy: positive surplus of availability over demand,
-    # normalised by demand. Represents the region's import-capable slack.
-    # Real interconnector flow requires market_driver_events which may not be backfilled.
+    # Weather from WEATHER_HISTORY rows (seeded by scripts/seed_training_data.py).
+    # Keyed by hour bucket — each 5-min interval looks up its parent hour.
+    temp_c = 0.0
+    wind_kmh = 0.0
+    if weather_by_hour:
+        hour_key = vt.replace(minute=0, second=0, microsecond=0)
+        wx = weather_by_hour.get(hour_key)
+        # Also try UTC-aware key in case weather_by_hour used UTC timestamps
+        if wx is None and not hour_key.tzinfo:
+            wx = weather_by_hour.get(hour_key.replace(tzinfo=timezone.utc))
+        if wx:
+            temp_c, wind_kmh, _ = wx
+
     ic_room = max(0.0, avail - demand) / max(demand, 1.0) if demand > 0 else 0.0
 
     return {
@@ -278,12 +321,14 @@ def _row_to_series_dict(
         "price": price,
         "demand": demand,
         "available_gen": avail,
-        "seasonal_price": 0.0,        # filled by _fill_derived_features
-        "aemo_predispatch": aemo_pd,   # None until filled; real PD value when present
-        "demand_forecast": None,       # filled by _fill_derived_features (30-min lag)
+        "seasonal_price": 0.0,
+        "aemo_predispatch": aemo_pd,
+        "demand_forecast": None,
         "interconnector_room": ic_room,
         "renewable_frac": ren_frac,
-        "roll_vol_12": 0.0,            # filled by _fill_derived_features
+        "roll_vol_12": 0.0,
+        "temp_c": temp_c,
+        "wind_kmh": wind_kmh,
     }
 
 

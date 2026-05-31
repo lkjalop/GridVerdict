@@ -285,7 +285,7 @@ def _run_sync(
     if lnn:
         forecasts.append(lnn)
     else:
-        errors.append({"model": "experimental_lnn", "error": "trained LNN weights/buffer unavailable"})
+        errors.append({"model": "lnn_ltc", "error": "trained LNN weights/buffer unavailable"})
 
     # Widen P10/P90 uncertainty bands beyond the 30-min training horizon
     if horizon_intervals > _TRAIN_HORIZON:
@@ -309,9 +309,9 @@ def _run_sync(
     _model_names = {f["model"] for f in forecasts}
     primary = (
         "meta_ensemble" if "meta_ensemble" in _model_names
-        else "qra" if "qra" in _model_names
-        else "lnn_cfc" if "lnn_cfc" in _model_names
-        else "experimental_lnn" if "experimental_lnn" in _model_names
+        else "lnn_ltc"    if "lnn_ltc"    in _model_names   # LNN is primary when trained
+        else "lnn_cfc"    if "lnn_cfc"    in _model_names
+        else "qra"        if "qra"        in _model_names   # QRA as statistical fallback
         else forecasts[0]["model"]
     )
     return {
@@ -418,7 +418,7 @@ def _apply_horizon_widening(
     relative horizon distance, analogous to Brownian motion. Applied only to
     probabilistic ensemble/model outputs; baselines are left unchanged.
     """
-    primary_names = {"meta_ensemble", "qra", "lear", "lnn_cfc", "experimental_lnn", "gbm"}
+    primary_names = {"meta_ensemble", "qra", "lear", "lnn_cfc", "lnn_ltc", "gbm"}
     result = []
     for fc in forecasts:
         if fc.get("model") not in primary_names:
@@ -480,15 +480,15 @@ def _lnn_multistep_forecast(
         results = trainer.predict_multistep_from_buffer(steps)
         if not results:
             return None
-        register_model("experimental_lnn", "1.0.0", f"{region}:live-ltc-multistep", {"source": "ltc_trainer", "steps": steps})
+        register_model("lnn_ltc", "1.0.0", f"{region}:live-ltc-multistep", {"source": "ltc_trainer", "steps": steps})
         return {
-            "model": "experimental_lnn",
+            "model": "lnn_ltc",
             "target_times": [t.isoformat() for t in target_times],
             "p10": [round(float(r["p10"]), 2) for r in results],
             "p50": [round(float(r["p50"]), 2) for r in results],
             "p90": [round(float(r["p90"]), 2) for r in results],
             "quantiles": [0.1, 0.5, 0.9],
-            "caveat": f"LNN multi-step autoregressive rollout ({steps} intervals); uncertainty accumulates with horizon.",
+            "caveat": f"LNN-LTC multi-step autoregressive rollout ({steps} intervals); uncertainty accumulates with horizon.",
         }
     except Exception as exc:
         logger.debug("LNN multi-step forecast unavailable for %s: %s", region, exc)
@@ -502,10 +502,10 @@ def _lnn_forecast(region: str, target_times: list[datetime]) -> dict[str, Any] |
         result = get_forecast(region)
         if not result:
             return None
-        register_model("experimental_lnn", "1.0.0", f"{region}:live-ltc-weights", {"source": "ltc_trainer"})
+        register_model("lnn_ltc", "1.0.0", f"{region}:live-ltc-weights", {"source": "ltc_trainer"})
         values = [[float(result["p10"]), float(result["p50"]), float(result["p90"])]]
         return {
-            "model": "experimental_lnn",
+            "model": "lnn_ltc",
             "target_times": [t.isoformat() for t in target_times],
             "p10": [values[0][0]],
             "p50": [values[0][1]],

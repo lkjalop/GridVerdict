@@ -640,7 +640,13 @@ def _decompose_rules(
         "availability", "spot price", "rrp", "regional reference price",
         "predispatch", "5-minute", "5 minute settlement",
     ])
-    if _nem_term_query:
+    _current_price_lookup = any(p in lower for p in [
+        "current", "live", "right now", "now", "latest", "today",
+    ]) and any(t in lower for t in [
+        "dispatch price", "spot price", "rrp", "regional reference price",
+        "price", "prices",
+    ])
+    if _nem_term_query and intent != IntentLabel.COMPARISON and not _current_price_lookup:
         intent = IntentLabel.EXPLANATION
         confidence = 0.82
 
@@ -871,8 +877,9 @@ def _decompose_rules(
             "For LCOE, grid connection, and PPA modelling, see AEMO ISP and CSIRO GenCost."
         )
 
-    elif (_interest_rate_bridge or _policy_bridge or _lng_gas_bridge or _budget_fiscal_bridge) and intent in (
-        IntentLabel.LOOKUP, IntentLabel.COMPARISON, IntentLabel.RETROSPECTIVE,
+    elif (_interest_rate_bridge or _policy_bridge or _lng_gas_bridge or _budget_fiscal_bridge) and (
+        intent in (IntentLabel.LOOKUP, IntentLabel.COMPARISON, IntentLabel.RETROSPECTIVE)
+        or (intent == IntentLabel.EXPLANATION and not _causal_how)
     ):
         intent = IntentLabel.EVIDENCE_BRIDGE
         confidence = 0.68

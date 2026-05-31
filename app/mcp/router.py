@@ -115,6 +115,44 @@ async def _dispatch(name: str, tool, **kwargs: Any) -> Any:
         region = kwargs.get("region", "NSW1")
         return await WeatherConsensusClient().fetch_region_consensus(region)
 
+    if name == "bom_7day_forecast":
+        from app.mcp.bom_forecast_client import fetch_7day_forecast, forecast_to_scatter_context
+        region = kwargs.get("region", "NSW1")
+        forecast = await fetch_7day_forecast(region)
+        if forecast is None:
+            raise MCPCallError(f"BOM 7-day forecast unavailable for {region}")
+        return forecast_to_scatter_context(forecast)
+
+    if name == "gas_market_state":
+        from app.mcp.gbb_client import get_gas_market_state
+        region = kwargs.get("region", "NSW1")
+        state = await get_gas_market_state(region)
+        return state.to_dict()
+
+    if name == "isp_scenario":
+        from app.mcp.isp_client import get_isp_scenario
+        region = kwargs.get("region", "NSW1")
+        scenario = kwargs.get("scenario", "Step Change")
+        year_from = int(kwargs.get("year_from", 2025))
+        year_to = int(kwargs.get("year_to", 2040))
+        result = get_isp_scenario(region, year_from=year_from, year_to=year_to, scenario=scenario)
+        return result.to_dict()
+
+    if name == "lcoe_sensitivity":
+        from app.engines.lcoe_sensitivity import compare_technologies, rate_change_impact
+        gas_price = float(kwargs.get("gas_price_gj", 10.0))
+        discount_rate = float(kwargs.get("discount_rate", 0.08))
+        rate_from = kwargs.get("rate_from")
+        rate_to = kwargs.get("rate_to")
+        if rate_from is not None and rate_to is not None:
+            return rate_change_impact(float(rate_from), float(rate_to), gas_price)
+        return compare_technologies(discount_rate=discount_rate, gas_price_gj=gas_price)
+
+    if name == "fiscal_budget":
+        from app.mcp.fiscal_budget_client import search_budget_measures
+        query_text = kwargs.get("query", "energy budget measures")
+        return await search_budget_measures(query_text)
+
     raise MCPCallError(f"No dispatcher implemented for tool {name!r}")
 
 
@@ -129,6 +167,12 @@ _TOOL_TO_SOURCE: dict[str, str] = {
     "live_quantile_forecast": "LIVE_QUANTILE_FORECAST",
     "nem_news_rss":           "NEM_NEWS_RSS",
     "weather_consensus":      "WEATHER_CONSENSUS",
+    # New tools: adjacent query evidence feeds
+    "bom_7day_forecast":      "BOM_7DAY_FORECAST",
+    "gas_market_state":       "AEMO_STTM_GAS",
+    "isp_scenario":           "AEMO_ISP_2024",
+    "lcoe_sensitivity":       "CSIRO_GENCOST_2024",
+    "fiscal_budget":          "AUS_BUDGET_ENERGY",
 }
 
 

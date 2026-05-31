@@ -49,6 +49,27 @@ class ForecastWindow:
 
 
 @dataclass
+class RegimeScore:
+    """Metrics for one price regime (normal / elevated / spike / extreme)."""
+    regime: str
+    n_intervals: int
+    crps: float
+    pinball: float
+    spike_recall: float       # fraction of this regime's intervals flagged correctly
+    calibration_error: float
+
+    def to_dict(self) -> dict:
+        return {
+            "regime": self.regime,
+            "n_intervals": self.n_intervals,
+            "crps": round(self.crps, 4),
+            "pinball": round(self.pinball, 4),
+            "spike_recall": round(self.spike_recall, 4),
+            "calibration_error": round(self.calibration_error, 4),
+        }
+
+
+@dataclass
 class ModelScore:
     model_name: str
     pinball: float
@@ -61,6 +82,7 @@ class ModelScore:
     p90_exceedance_rate: float = 0.0
     coverage: dict[float, float] = field(default_factory=dict)
     skill_vs: dict[str, float] = field(default_factory=dict)
+    per_regime: list["RegimeScore"] = field(default_factory=list)
 
 
 @dataclass
@@ -117,6 +139,7 @@ class BacktestReport:
                     "skill_vs_aemo": round(s.skill_vs.get("aemo_predispatch", float("nan")), 4),
                     "skill_vs_persistence": round(s.skill_vs.get("persistence", float("nan")), 4),
                     "skill_vs_seasonal_naive": round(s.skill_vs.get("seasonal_naive", float("nan")), 4),
+                    "per_regime": [r.to_dict() for r in s.per_regime],
                 }
                 for s in self.scores
             ],

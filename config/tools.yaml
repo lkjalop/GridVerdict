@@ -103,3 +103,53 @@ tools:
     poll_interval_s: 300
     staleness_threshold_s: 600
     enabled: true
+
+  - name: bom_7day_forecast
+    description: "7-day daily weather forecast per NEM region (Open-Meteo daily API) — temperature, wind, solar irradiance, precipitation for LNN scenario injection"
+    category: weather
+    endpoint: "https://api.open-meteo.com/v1/forecast"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 3600
+    staleness_threshold_s: 7200
+    enabled: true
+
+  - name: gas_market_state
+    description: "East coast gas hub prices (AEMO STTM) + ACCC LNG netback context — Wallumbilla/STTM settlement prices, implied SRMC for CCGT/OCGT, gas-electricity nexus evidence"
+    category: gas
+    endpoint: "https://www.aemo.com.au/aemo/apps/api/report/STTM_TRADING_HUB"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 86400
+    staleness_threshold_s: 172800
+    enabled: true
+
+  - name: isp_scenario
+    description: "AEMO ISP 2024 scenario price trajectories (Step Change, Slow Change) + coal retirement schedule + REZ pipeline — long-run NEM price context"
+    category: planning
+    endpoint: "internal:isp_client"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 0
+    staleness_threshold_s: 31536000
+    enabled: true
+
+  - name: lcoe_sensitivity
+    description: "CSIRO GenCost 2023-24 LCOE sensitivity analysis — technology cost comparison at variable discount rates, rate-change impact across solar/wind/gas/coal"
+    category: analysis
+    endpoint: "internal:lcoe_sensitivity_engine"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 0
+    staleness_threshold_s: 31536000
+    enabled: true
+
+  - name: fiscal_budget
+    description: "Australian Government Budget energy measures knowledge base — ARENA, CEFC, CIS, Rewiring the Nation, hydrogen, transmission programs and their NEM price impact"
+    category: policy
+    endpoint: "internal:fiscal_budget_client"
+    read_only: true
+    requires_auth: false
+    poll_interval_s: 0
+    staleness_threshold_s: 7776000
+    enabled: true

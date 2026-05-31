@@ -227,6 +227,8 @@ async def data_status(db: AsyncSession = DBSession):
                     "available": False,
                     "buffer_intervals": int(buf),
                     "min_train_required": 288,
+                    "torch_version": getattr(trainer, "torch_version", None),
+                    "n_features": getattr(trainer, "n_features", None),
                 }
             else:
                 last_t = getattr(trainer, "last_trained_at", None)
@@ -238,6 +240,10 @@ async def data_status(db: AsyncSession = DBSession):
                     "available": True,
                     "trained_on_intervals": getattr(trainer, "training_rows", None),
                     "checkpoint_age_hours": age_h,
+                    "torch_version": getattr(trainer, "torch_version", None),
+                    "inference_latency_ms": getattr(trainer, "last_inference_latency_ms", None),
+                    "rollback_available": getattr(trainer, "_has_backup", False),
+                    "n_features": getattr(trainer, "n_features", None),
                 }
     except Exception as exc:
         lnn_trainers = {"error": str(exc)}
@@ -273,8 +279,7 @@ async def data_status(db: AsyncSession = DBSession):
     }
 
 
-def _iso(dt: datetime, hours: int) -> str:
+def _iso(dt: datetime, hours: int) -> datetime:
     from datetime import timedelta
-    # Use space separator so the string sorts correctly against SQLite's storage
-    # format ("YYYY-MM-DD HH:MM:SS..."). PostgreSQL accepts both 'T' and ' '.
-    return (dt - timedelta(hours=hours)).isoformat().replace("T", " ")
+    # asyncpg requires a datetime object, not a string
+    return dt - timedelta(hours=hours)

@@ -203,6 +203,9 @@ _ABBREV = {
     "lookup": "lookup",
     "trace_replay": "trace ",
     "out_of_scope": "OOS   ",
+    "partial_scope": "part  ",
+    "evidence_bridge": "evbrdg",
+    "geographic_redirect": "geordr",
 }
 
 

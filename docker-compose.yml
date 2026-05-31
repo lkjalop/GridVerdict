@@ -36,6 +36,8 @@ services:
       - nemweb_cache:/app/cache/nemweb
       - ./frontend:/app/frontend:ro
       - lnn_weights:/app/data/lnn_weights
+      - ./app:/app/app                   # dev hot-reload: code changes without rebuild
+      - ./config:/app/config:ro          # dev hot-reload: settings + tools.yaml
     ports:
       - "8000:8000"
 

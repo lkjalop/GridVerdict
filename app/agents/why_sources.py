@@ -142,6 +142,9 @@ class WhySources:
     technology: TechnologyContext = field(default_factory=TechnologyContext)
     fcas: FcasContext = field(default_factory=FcasContext)
     source_coverage: float = 0.0   # fraction of scatter_gather tasks that returned data
+    # Intraday price history: list of {time, price, hour} for today midnight→now-1h
+    # Populated when query references "earlier today", "this morning", "pay double" etc.
+    intraday_prices: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -257,9 +260,9 @@ def _build_model_detail_from_live_forecast(gather, classifier) -> list[ModelFore
         # Explain why — distinguish "no DB history yet" from timeout
         reason = live.get("reason", "insufficient data") if live else "not available"
         return [
-            ModelForecastDetail(model="lnn",  available=False, caveat=_lnn_caveat(gather)),
-            ModelForecastDetail(model="lear", available=False, caveat=reason),
-            ModelForecastDetail(model="qra",  available=False, caveat=reason),
+            ModelForecastDetail(model="lnn_ltc", available=False, caveat=_lnn_caveat(gather)),
+            ModelForecastDetail(model="lear",    available=False, caveat=reason),
+            ModelForecastDetail(model="qra",     available=False, caveat=reason),
         ]
 
     detail: list[ModelForecastDetail] = []
@@ -268,15 +271,15 @@ def _build_model_detail_from_live_forecast(gather, classifier) -> list[ModelFore
 
     preferred = [
         ("meta_ensemble", "meta_ensemble"),
-        ("qra", "qra"),
-        ("lear", "lear"),
-        ("experimental_lnn", "lnn"),
-        ("lnn", "lnn"),
-        ("gbm", "gbm"),
-        ("tcn", "tcn"),
-        ("seasonal_naive", "seasonal_naive"),
-        ("persistence", "persistence"),
-        ("aemo_predispatch", "aemo_predispatch"),
+        ("lnn_ltc",       "lnn_ltc"),   # first-class LNN (was experimental_lnn)
+        ("lnn_cfc",       "lnn_cfc"),
+        ("qra",           "qra"),
+        ("lear",          "lear"),
+        ("gbm",           "gbm"),
+        ("tcn",           "tcn"),
+        ("seasonal_naive",    "seasonal_naive"),
+        ("persistence",       "persistence"),
+        ("aemo_predispatch",  "aemo_predispatch"),
     ]
     seen_models: set[str] = set()
 
@@ -303,9 +306,9 @@ def _build_model_detail_from_live_forecast(gather, classifier) -> list[ModelFore
             ))
         else:
             err = errors_by_model.get(model_key, "not in forecast output")
-            if label == "lnn":
+            if label == "lnn_ltc":
                 err = _lnn_caveat(gather)
-            if model_key in {"experimental_lnn", "lear", "qra"}:
+            if model_key in {"lnn_ltc", "lear", "qra"}:
                 detail.append(ModelForecastDetail(model=label, available=False, caveat=err))
 
     for model_key, fc in forecasts_by_model.items():

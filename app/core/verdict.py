@@ -29,9 +29,15 @@ def derive_verdict(
     intent: IntentLabel | None = None,
 ) -> VerdictLabel:
     """Deterministic verdict from measurable source/coverage signals."""
-    # Out-of-scope intent must never produce SUPPORTED — short-circuit first
+    # Adjacent intents short-circuit before data checks — they have their own
+    # verdict logic driven by the adjacent_handlers module, not live data.
     if intent == IntentLabel.OUT_OF_SCOPE:
         return VerdictLabel.OUT_OF_SCOPE
+    if intent == IntentLabel.GEOGRAPHIC_REDIRECT:
+        return VerdictLabel.PARTIAL_SCOPE   # structural answer, no live data needed
+    if intent in (IntentLabel.PARTIAL_SCOPE, IntentLabel.EVIDENCE_BRIDGE):
+        return VerdictLabel.PARTIAL_SCOPE   # capped — never reaches SUPPORTED
+
     if not live_data_fresh:
         return VerdictLabel.INSUFFICIENT_DATA
     if requires_archive and not archive_available:
@@ -60,6 +66,8 @@ def derive_action(
         return ActionLabel.MONITOR
     if verdict == VerdictLabel.OUT_OF_SCOPE:
         return ActionLabel.REFUSE
+    if verdict == VerdictLabel.PARTIAL_SCOPE:
+        return ActionLabel.MONITOR   # partial answer — user should read the scope note
 
     if regime in ("spike", "extreme") and forecast_direction == "rising":
         if analog_success_rate >= 0.70:

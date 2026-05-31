@@ -20,6 +20,7 @@ class VerdictLabel(str, Enum):
     INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
     OUT_OF_SCOPE = "OUT_OF_SCOPE"
     NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
+    PARTIAL_SCOPE = "PARTIAL_SCOPE"   # answerable NEM sub + unanswerable external sub
 
 
 class ActionLabel(str, Enum):
@@ -54,6 +55,10 @@ class IntentLabel(str, Enum):
     LOOKUP = "lookup"
     TRACE_REPLAY = "trace_replay"
     OUT_OF_SCOPE = "out_of_scope"
+    # Adjacent-query taxonomy — partial answers with honest scope boundaries
+    PARTIAL_SCOPE = "partial_scope"           # NEM sub answered + external sub declined
+    EVIDENCE_BRIDGE = "evidence_bridge"       # NEM evidence + mechanism + scope boundary
+    GEOGRAPHIC_REDIRECT = "geographic_redirect"  # non-NEM market + NEM equivalent offered
 
 
 class EvidenceRefSchema(BaseModel):
@@ -157,6 +162,9 @@ class QueryDecomposition(BaseModel):
     clarifying_question: str | None = None
     region_corrections: list[str] = Field(default_factory=list)
     output_contract: list[str] = Field(default_factory=list)
+    # Adjacent-query fields (populated for PARTIAL_SCOPE / EVIDENCE_BRIDGE / GEOGRAPHIC_REDIRECT)
+    adjacent_context: dict[str, Any] | None = None  # {answerable_sub, unanswerable_sub, bridge_mechanism, redirect_resource}
+    geographic_market: str | None = None             # "WA_WEM" | "NT_GRID" | None
 
 
 class FactualVerdict(BaseModel):
@@ -191,7 +199,7 @@ class FactualVerdict(BaseModel):
 
     @model_validator(mode="after")
     def numeric_claims_need_evidence(self) -> "FactualVerdict":
-        """Every non-LOW_CONFIDENCE answer must have at least one evidence ref."""
+        """SUPPORTED verdict must have at least one evidence ref. Partial/OOS are exempt."""
         if self.verdict == VerdictLabel.SUPPORTED and not self.evidence_refs:
             raise ValueError("SUPPORTED verdict requires at least one evidence_ref")
         return self
