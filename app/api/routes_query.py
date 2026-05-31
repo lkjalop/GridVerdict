@@ -14,6 +14,7 @@ Pipeline (all async, ~1s standard path):
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -39,6 +40,8 @@ from app.core.schema import (
     IntentLabel,
     VerdictLabel,
 )
+# QueryDecomposition type hint (used in helper function signatures)
+from app.core.schema import QueryDecomposition as _QueryDecompositionType  # noqa: F401
 from app.data.aemo_live_client import AEMOLiveClient
 from app.data.cache import MarketCache
 from app.db.models import Query as QueryModel
@@ -53,6 +56,21 @@ from app.api.metrics_registry import query_latency_ms, llm_decompose_latency_ms
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["query"])
+
+# In-memory progress tracker — keyed by session_id (one active query per session)
+# Each value: list of {"step": str, "message": str, "t_ms": int}
+_query_progress: dict[str, list[dict]] = {}
+
+
+def _progress(session_id: str, step: str, message: str, t0: float) -> None:
+    """Write a progress step visible to the polling endpoint."""
+    if session_id not in _query_progress:
+        _query_progress[session_id] = []
+    _query_progress[session_id].append({
+        "step": step,
+        "message": message,
+        "t_ms": round((time.perf_counter() - t0) * 1000),
+    })
 
 
 class QueryRequest(BaseModel):
@@ -81,6 +99,20 @@ class QueryResponse(BaseModel):
     live_forecast: dict | None = None             # full 48-interval ensemble forecast for chart
 
 
+@router.get("/sessions/{session_id}/progress")
+async def get_query_progress(
+    session_id: str,
+    user: TokenPayload = Depends(get_current_user),
+) -> dict:
+    """Poll progress of the active query for this session.
+
+    Returns list of step dicts while query is running; empty list when idle.
+    Frontend polls every 500ms and shows messages after 5s elapsed.
+    """
+    steps = _query_progress.get(session_id, [])
+    return {"session_id": session_id, "steps": steps, "active": bool(steps)}
+
+
 @router.post("/sessions/{session_id}/query", response_model=QueryResponse)
 async def submit_query(
     session_id: str,
@@ -99,6 +131,10 @@ async def submit_query(
     trace_id = f"trace-{uuid.uuid4().hex[:12]}"
     _t0 = time.perf_counter()
     _events: list[dict] = [{"step": "QUERY_RECEIVED", "t_ms": 0, "region": body.region, "text_len": len(body.text)}]
+
+    # Initialise progress tracker for this session
+    _query_progress[session_id] = []
+    _progress(session_id, "security", "Security scan…", _t0)
 
     # --- 0. Security pass 1 — input hygiene ---
     observer = get_observer()
@@ -150,10 +186,11 @@ async def submit_query(
         "it", "that", "this", "there", "those", "same", "rather",
         "instead", "also", "other", "now", "currently",
     }
+    _tokens = set(re.findall(r"\b[a-z0-9]+\b", _text_lower))
     _is_contextual = _is_short and (
-        any(w in _text_lower for w in _CONTEXT_WORDS)
+        bool(_tokens & _CONTEXT_WORDS)
         or any(_text_lower.startswith(p) for p in _CONTEXT_STARTS)
-        or any(r in _text_lower for r in _REGION_CODES)
+        or bool(_tokens & _REGION_CODES)
         or (_text_lower.endswith("?") and len(body.text.split()) <= 6)
     )
     if _is_contextual:
@@ -202,6 +239,24 @@ async def submit_query(
         if _sq:
             decomp = decomp.model_copy(update={"sub_questions": _sq})
     llm_decompose_latency_ms.observe((time.perf_counter() - _decomp_t0) * 1000)
+
+    # Intent-specific gather message — reveals the architecture in the demo
+    _gather_msg_map = {
+        "future_date_price_forecast": "Scatter-gather: AEMO dispatch · seasonal history · BOM 7-day forecast…",
+        "trend_analysis":             "Scatter-gather: AEMO dispatch · 3yr price history · fuel mix trends…",
+        "diurnal_analysis":           "Scatter-gather: AEMO dispatch · unit dispatch by hour · weather…",
+        "fuel_source_recommendation": "Scatter-gather: AEMO dispatch · unit dispatch by fuel · LNN/LEAR/QRA…",
+        "causal_explanation":         "Scatter-gather: AEMO dispatch · constraints · driver attribution · analogs…",
+        "historical_analog_outcome":  "Scatter-gather: AEMO dispatch · 3yr analogs · historical context…",
+        "regional_comparison":        "Scatter-gather: AEMO dispatch for all regions · interconnector flows…",
+    }
+    _gather_msg = _gather_msg_map.get(
+        decomp.requested_output or "",
+        "Scatter-gather agents: AEMO dispatch · LNN/LEAR/QRA forecast · analogs · constraints…",
+    )
+    _progress(session_id, "decompose", f"Intent: {decomp.intent.value} — {decomp.requested_output or 'routing'}…", _t0)
+    _progress(session_id, "gather", _gather_msg, _t0)
+
     _events.append({
         "step": "DECOMPOSE",
         "t_ms": round((time.perf_counter() - _t0) * 1000),
@@ -212,6 +267,101 @@ async def submit_query(
         "sub_questions": [sq.get("type") for sq in (decomp.sub_questions or [])],
         **({"clarifying": decomp.clarifying_question} if decomp.clarifying_question else {}),
     })
+
+    # --- 1a. Adjacent query path (PARTIAL_SCOPE / EVIDENCE_BRIDGE / GEOGRAPHIC_REDIRECT) ---
+    # These intents are handled entirely by adjacent_handlers — no scatter-gather needed.
+    # The handler assembles a structured answer from reference data + any cached evidence.
+    _ADJACENT_INTENTS = {
+        IntentLabel.PARTIAL_SCOPE,
+        IntentLabel.EVIDENCE_BRIDGE,
+        IntentLabel.GEOGRAPHIC_REDIRECT,
+    }
+    if decomp.intent in _ADJACENT_INTENTS:
+        from app.engines.adjacent_handlers import dispatch_adjacent_handler
+        _adj_result = await dispatch_adjacent_handler(decomp, region, db)
+
+        _adj_verdict = FactualVerdict(
+            verdict=VerdictLabel.PARTIAL_SCOPE,
+            action=ActionLabel.MONITOR,
+            confidence=decomp.confidence,
+            confidence_band=ConfidenceBand.MEDIUM if decomp.confidence >= 0.60 else ConfidenceBand.LOW,
+            as_of=datetime.now(timezone.utc),
+            why_plain_english=_adj_result.get("why_plain_english", decomp.clarifying_question or ""),
+            answer_sections=_adj_result.get("sections", []),
+            missing_data=_adj_result.get("missing_data", []),
+            upgrade_path=_adj_result.get("upgrade_path", []),
+            counterargument=(
+                "GridVerdict only answered the NEM-relevant portion. "
+                "External data sources are needed for the full answer — see 'Scope boundary' section."
+            ),
+            disclaimer=(
+                "Partial scope response. NEM evidence from AEMO public data. "
+                "External data sources cited are not verified in real-time. "
+                "Not financial advice."
+            ),
+            trace_id=trace_id,
+        )
+        _events.append({
+            "step": "ADJACENT_HANDLER",
+            "t_ms": round((time.perf_counter() - _t0) * 1000),
+            "intent": decomp.intent.value,
+            "requested_output": decomp.requested_output or "",
+            "geographic_market": decomp.geographic_market,
+        })
+
+        # Security pass on adjacent answer
+        _adj_check = observer.pass_answer(_adj_verdict.model_dump(mode="json"))
+        append_observer_result(_adj_check, "answer")
+        if _adj_check.should_halt():
+            _adj_verdict = FactualVerdict(
+                verdict=VerdictLabel.INSUFFICIENT_DATA,
+                action=ActionLabel.MONITOR,
+                confidence=0.0,
+                confidence_band=ConfidenceBand.VERY_LOW,
+                as_of=datetime.now(timezone.utc),
+                why_plain_english="Adjacent answer failed security validation.",
+                counterargument="",
+                trace_id=trace_id,
+            )
+
+        # Persist and return
+        _adj_answer_dict = _adj_verdict.model_dump(mode="json")
+        db.add(QueryModel(
+            id=query_id, tenant_id=user.tenant_id, session_id=session_id,
+            raw_query=body.text,
+            decomposition=decomp.model_dump(mode="json"),
+            answer=_adj_answer_dict,
+            trace_id=trace_id,
+            intent=decomp.intent.value,
+            verdict=_adj_verdict.verdict.value,
+            region=region,
+        ))
+        await write_trace(
+            session=db, trace_id=trace_id, tenant_id=user.tenant_id,
+            query_id=query_id, valid_time=datetime.now(timezone.utc),
+            decomposition=decomp.model_dump(mode="json"),
+            tool_calls=[{"source": "ADJACENT_HANDLER", "requested_output": decomp.requested_output}],
+            answer=_adj_answer_dict,
+            observer_result=_adj_check.to_dict(),
+            prefill={"pipeline_events": _events},
+        )
+        await db.flush()
+        session.updated_at = datetime.now(timezone.utc)
+
+        _adj_suggested = _generate_followup_questions_adjacent(decomp, region)
+        _events.append({"step": "COMPLETE", "t_ms": round((time.perf_counter() - _t0) * 1000)})
+        _adj_decomp_dict = decomp.model_dump(mode="json")
+        _adj_decomp_dict["trace_id"] = trace_id
+        return QueryResponse(
+            query_id=query_id,
+            session_id=session_id,
+            intent=decomp.intent.value,
+            verdict=_adj_verdict,
+            decomposition=_adj_decomp_dict,
+            viewport_type=_intent_to_viewport(decomp.intent),
+            pipeline_events=_events,
+            suggested_questions=_adj_suggested,
+        )
 
     # --- 1a. Ambiguity gate — return clarifying question instead of guessing ---
     # Fires when decomposer confidence is low AND a clarifying question is available.
@@ -484,15 +634,25 @@ async def submit_query(
                 logger.debug("Routing correction live scatter failed (non-fatal): %s", _rc_err)
 
     if gather.dispatch:
-        gather.recent_dispatch = await _load_recent_dispatch_context(db, region, gather.dispatch.valid_time)
+        # Use savepoints (begin_nested) so a failing SELECT doesn't abort the main transaction.
+        # A full rollback would undo previously committed observer events causing PK violations.
         try:
-            from app.engines.driver_attribution import retrieve_market_drivers
-            gather.driver_events = await retrieve_market_drivers(db, region, gather.dispatch.valid_time)
+            async with db.begin_nested():
+                gather.recent_dispatch = await _load_recent_dispatch_context(
+                    db, region, gather.dispatch.valid_time
+                )
+        except Exception as exc:
+            logger.debug("Recent dispatch context unavailable: %s", exc)
+        try:
+            async with db.begin_nested():
+                from app.engines.driver_attribution import retrieve_market_drivers
+                gather.driver_events = await retrieve_market_drivers(db, region, gather.dispatch.valid_time)
         except Exception as exc:
             logger.debug("Driver attribution unavailable: %s", exc)
         try:
-            from app.engines.unit_attribution import retrieve_unit_dispatch
-            gather.unit_events = await retrieve_unit_dispatch(db, region, gather.dispatch.valid_time)
+            async with db.begin_nested():
+                from app.engines.unit_attribution import retrieve_unit_dispatch
+                gather.unit_events = await retrieve_unit_dispatch(db, region, gather.dispatch.valid_time)
         except Exception as exc:
             logger.debug("Unit attribution unavailable: %s", exc)
 
@@ -524,7 +684,8 @@ async def submit_query(
             region=region,
             max_docs=12,
         )
-        _bundle = await _trag_retrieve(_trag_query, session=db)
+        async with db.begin_nested():
+            _bundle = await _trag_retrieve(_trag_query, session=db)
         temporal_evidence = [
             {
                 "doc_id": d.doc_id,
@@ -551,13 +712,37 @@ async def submit_query(
         # Pass T9 scatter unit_events so fuel_mix uses live dispatch data (tier 0)
         # instead of re-querying the DB (tier 1). Only saves a round-trip but also
         # ensures the fuel recommendation uses the same interval as the answer.
-        fuel_mix = await get_fuel_mix(
-            region, db,
-            weather=gather.weather,
-            unit_events=gather.unit_events or None,
-        )
+        async with db.begin_nested():
+            fuel_mix = await get_fuel_mix(
+                region, db,
+                weather=gather.weather,
+                unit_events=gather.unit_events or None,
+            )
     except Exception as exc:
         logger.debug("Fuel mix retrieval failed (non-fatal): %s", exc)
+
+    # --- 2c5. BOM 7-day forecast — injected when query requires forward weather scenario ---
+    # Runs after scatter-gather; does NOT block the primary verdict path.
+    # Result is stored in gather.weather supplemental field when available.
+    if decomp.requires_forecast and gather.weather is None:
+        try:
+            from app.mcp.bom_forecast_client import fetch_7day_forecast, forecast_to_scatter_context
+            _bom = await fetch_7day_forecast(region)
+            if _bom is not None:
+                _bom_dict = forecast_to_scatter_context(_bom)
+                # Inject into gather as 7day_forecast supplemental (non-destructive)
+                from dataclasses import replace as _dc_replace
+                gather = _dc_replace(gather, weather=_bom_dict)
+                _sg_sources.append("BOM_7DAY_FORECAST")
+                _events.append({
+                    "step": "BOM_7DAY_FORECAST",
+                    "t_ms": round((time.perf_counter() - _t0) * 1000),
+                    "region": region,
+                    "days": len(_bom.days),
+                    "heatwave_days": len(_bom.days_with_heatwave()),
+                })
+        except Exception as _bom_err:
+            logger.debug("BOM 7-day forecast inject failed (non-fatal): %s", _bom_err)
 
     # --- 2d. Historical price distribution — for "is this cheap vs last year?" queries ---
     hist_dist: dict | None = None
@@ -574,18 +759,69 @@ async def submit_query(
     )
     if _wants_hist:
         try:
-            from app.engines.historical_price import get_historical_price_distribution
-            _anchor = gather.dispatch.valid_time if gather.dispatch else datetime.now(timezone.utc)
-            _hist_period = next(
-                (sq.get("period", "last_year") for sq in (decomp.sub_questions or [])
-                 if sq.get("type") == "historical_price_distribution"),
-                "last_year",
-            )
-            hist_dist = await get_historical_price_distribution(
-                db, region, _anchor, period=_hist_period,
-            )
+            async with db.begin_nested():
+                from app.engines.historical_price import get_historical_price_distribution
+                _anchor = gather.dispatch.valid_time if gather.dispatch else datetime.now(timezone.utc)
+                _hist_period = next(
+                    (sq.get("period", "last_year") for sq in (decomp.sub_questions or [])
+                     if sq.get("type") == "historical_price_distribution"),
+                    "last_year",
+                )
+                hist_dist = await get_historical_price_distribution(
+                    db, region, _anchor, period=_hist_period,
+                )
         except Exception as exc:
             logger.debug("Historical price distribution unavailable (non-fatal): %s", exc)
+
+    # --- 2e. Intraday price history — for "earlier today wind was $15, why pay double now?" ---
+    intraday_prices: list[dict] = []
+    _has_intraday_sq = any(
+        sq.get("type") == "intraday_price_cycle"
+        for sq in (decomp.sub_questions or [])
+    )
+    if _has_intraday_sq:
+        # Use a separate session so any DB error doesn't corrupt the main request session
+        try:
+            from app.db.session import db_session as _iday_session_factory
+            from sqlalchemy import text as _text
+            _now = datetime.now(timezone.utc)
+            _today_start = _now.replace(hour=0, minute=0, second=0, microsecond=0)
+            _cutoff = _now - timedelta(hours=1)
+            async with _iday_session_factory() as _iday_session:
+                _iday_result = await _iday_session.execute(_text("""
+                    SELECT valid_time, price_rrp
+                    FROM market_events
+                    WHERE source = 'AEMO_DISPATCH_PRICE'
+                      AND region = :region
+                      AND price_rrp IS NOT NULL
+                      AND valid_time >= :today_start
+                      AND valid_time <= :cutoff
+                    ORDER BY valid_time ASC
+                    LIMIT 288
+                """), {"region": region, "today_start": _today_start, "cutoff": _cutoff})
+                _rows = _iday_result.fetchall()
+            if _rows:
+                intraday_prices = []
+                for row in _rows:
+                    _vt = row[0]
+                    _vt_str = str(_vt)
+                    try:
+                        _hour = _vt.hour if hasattr(_vt, "hour") else int(_vt_str[11:13])
+                    except Exception:
+                        _hour = 0
+                    intraday_prices.append({
+                        "time": _vt_str,
+                        "price": float(row[1]),
+                        "hour": _hour,
+                    })
+            _events.append({
+                "step": "INTRADAY_PRICES",
+                "t_ms": round((time.perf_counter() - _t0) * 1000),
+                "region": region,
+                "rows": len(intraday_prices),
+            })
+        except Exception as _iday_err:
+            logger.debug("Intraday price fetch failed (non-fatal): %s", _iday_err)
 
     # Summarise fuel dispatch by type for the evidence event
     _fuel_by_type: dict[str, float] = {}
@@ -598,6 +834,15 @@ async def submit_query(
         1 for d in gather.driver_events
         if getattr(d, "constraint_id", None)
     ) if gather.driver_events else 0
+    _deepen_parts = []
+    if temporal_evidence: _deepen_parts.append(f"TemporalRAG {len(temporal_evidence)} docs")
+    if fuel_mix: _deepen_parts.append("fuel mix")
+    if hist_dist and hist_dist.get("available"): _deepen_parts.append("3yr history")
+    if gather.weather: _deepen_parts.append("weather")
+    _progress(session_id, "deepen",
+              f"Deepening: {' · '.join(_deepen_parts) or 'evidence assembled'}…", _t0)
+    _progress(session_id, "plan", "Building evidence-grounded answer…", _t0)
+
     _ev_assembled: dict = {
         "step": "EVIDENCE_ASSEMBLED",
         "t_ms": round((time.perf_counter() - _t0) * 1000),
@@ -663,6 +908,9 @@ async def submit_query(
 
     # --- 3. Assemble why sources + build narrative ---
     why_sources = assemble_why_sources(decomp, gather, region)
+    if intraday_prices:
+        from dataclasses import replace as _dc_replace_ws
+        why_sources = _dc_replace_ws(why_sources, intraday_prices=intraday_prices)
     evidence_quality = _build_evidence_quality(gather, temporal_evidence, fuel_mix, why_sources)
     provenance = (
         [s.to_dict() for s in gather.source_statuses.values()]
@@ -670,6 +918,42 @@ async def submit_query(
     )
     why_output = build_why(why_sources)
     factual = format_verdict(why_output, why_sources, trace_id)
+
+    # --- 3a. LNN evidence citation — inject EvidenceRefSchema when lnn_ltc is primary ---
+    # When the LNN is the primary forecast model, its prediction is a first-class
+    # evidence source and must appear in evidence_refs with a citable raw_ref.
+    try:
+        _live_fc = gather.live_forecast
+        if (
+            _live_fc
+            and _live_fc.get("available")
+            and _live_fc.get("primary_model") == "lnn_ltc"
+        ):
+            _lnn_fc_dict = next(
+                (f for f in _live_fc.get("forecasts", []) if f.get("model") == "lnn_ltc"),
+                None,
+            )
+            if _lnn_fc_dict and _lnn_fc_dict.get("p50"):
+                from app.core.schema import EvidenceRefSchema
+                _p50_val = _lnn_fc_dict["p50"][0] if isinstance(_lnn_fc_dict["p50"], list) else _lnn_fc_dict["p50"]
+                _lnn_ev = EvidenceRefSchema(
+                    source="LNN_LTC",
+                    region=region,
+                    interval=gather.dispatch.valid_time if gather.dispatch else datetime.now(timezone.utc),
+                    field="p50_forecast",
+                    value=float(_p50_val),
+                    raw_ref=f"lnn_ltc:{region}:live-ltc-multistep",
+                )
+                _existing_refs = list(factual.evidence_refs or [])
+                _existing_refs.append(_lnn_ev)
+                factual = factual.model_copy(update={"evidence_refs": _existing_refs})
+                logger.debug(
+                    "LNN-LTC evidence injected for %s: p50=%.2f raw_ref=%s",
+                    region, float(_p50_val), _lnn_ev.raw_ref,
+                )
+    except Exception as _lnn_cite_err:
+        logger.debug("LNN evidence citation failed (non-fatal): %s", _lnn_cite_err)
+
     _events.append({
         "step": "VERDICT",
         "t_ms": round((time.perf_counter() - _t0) * 1000),
@@ -855,6 +1139,7 @@ async def submit_query(
     db.add(query_row)
 
     _events.append({"step": "COMPLETE", "t_ms": round((time.perf_counter() - _t0) * 1000)})
+    _query_progress.pop(session_id, None)  # clear progress — response is on its way
     await write_trace(
         session=db,
         trace_id=trace_id,
@@ -1036,7 +1321,74 @@ def _intent_to_viewport(intent: IntentLabel) -> str:
         IntentLabel.TRACE_REPLAY: "trace_replay",
         IntentLabel.OUT_OF_SCOPE: "out_of_scope",
         IntentLabel.COMPARISON: "comparison",
+        # Adjacent query intents — use dedicated partial-scope viewport
+        IntentLabel.PARTIAL_SCOPE: "partial_scope",
+        IntentLabel.EVIDENCE_BRIDGE: "partial_scope",
+        IntentLabel.GEOGRAPHIC_REDIRECT: "partial_scope",
     }.get(intent, "verdict")
+
+
+def _generate_followup_questions_adjacent(
+    decomp: "QueryDecomposition",
+    region: str,
+) -> list[str]:
+    """Generate context-aware follow-up questions for adjacent-intent responses."""
+    requested = decomp.requested_output or ""
+    intent = decomp.intent.value if decomp.intent else ""
+    questions: list[str] = []
+
+    if requested == "solar_household_context":
+        questions = [
+            f"What is the current {region} spot price right now?",
+            f"How does the midday {region} price compare to the 6pm peak?",
+            "Is SA spot cannibalisation worse than NSW for solar returns?",
+        ]
+    elif requested == "renewable_investment_price_context":
+        questions = [
+            f"What does AEMO ISP Step Change project for {region} prices in 2030?",
+            f"How often does {region} see prices above $200/MWh — what's the spike risk?",
+            "Compare NSW and SA for wind vs solar investment returns",
+        ]
+    elif requested == "geographic_redirect":
+        geo = decomp.geographic_market or "WA"
+        questions = [
+            f"How does SA differ from NSW in renewable penetration?",
+            f"What is the current spot price in SA (closest NEM analog to {geo})?",
+            "Compare all NEM regions by price and renewable share right now",
+        ]
+    elif requested in ("policy_evidence_bridge",):
+        questions = [
+            f"What happened to {region} prices when Hazelwood closed?",
+            "What is the AEMO ISP Step Change vs Slow Change price difference in 2030?",
+            f"How much coal capacity is left in {region}?",
+        ]
+    elif requested in ("macro_mechanism_bridge",):
+        # Real-user questions: connect the mechanism to something they can act on
+        questions = [
+            f"What is the current {region} spot price and which fuel type is setting it?",
+            f"Is {region} electricity cheap or expensive compared to last year?",
+            "Should I sign a fixed-rate energy contract now or stay on spot?",
+        ]
+    elif requested in ("gas_electricity_nexus",):
+        questions = [
+            f"Why is the {region} price elevated right now?",
+            "What is the current east coast gas hub price?",
+            "How often does gas set the NEM spot price vs coal?",
+        ]
+    elif requested in ("fiscal_budget_bridge",):
+        questions = [
+            "What is the Capacity Investment Scheme and how does it affect NEM prices?",
+            "When will Rewiring the Nation transmission unlock the New England REZ?",
+            f"What is the current {region} renewable penetration?",
+        ]
+    else:
+        questions = [
+            f"What is the current {region} spot price?",
+            f"Why is {region} at this price right now?",
+            "Compare all NEM regions by price right now",
+        ]
+
+    return questions[:3]
 
 
 async def _load_recent_dispatch_context(
@@ -1162,34 +1514,55 @@ def _generate_followup_questions(
     price = gather.dispatch.price_rrp if gather.dispatch else None
     regime = gather.dispatch_regime if hasattr(gather, "dispatch_regime") else None
 
-    # Q1: Drill into the reason for current conditions
-    if intent in ("lookup", "comparison"):
-        questions.append(f"Why is {region} at this price right now?")
-    elif intent == "explanation":
-        questions.append(f"How long will {region} stay elevated?")
-    elif intent in ("action_recommendation", "fuel_source_recommendation"):
-        questions.append(f"What is the current {region} spot price?")
+    requested_output = decomp.requested_output or ""
+    raw_query = (decomp.raw_query or "").lower()
+    _future_date = (decomp.time_range or {}).get("future_date_ref", False)
 
-    # Q2: Forward-looking / forecast
-    if price and price > 200:
-        questions.append(f"Will {region} price drop below $200 in the next hour?")
-    elif price and price < 100:
-        questions.append(f"Is {region} cheap compared to last year?")
+    # Q1: Primary follow-up — most contextually useful
+    if _future_date:
+        # User asked about a future date → connect to historical analogs and seasonal data
+        questions.append(f"What were {region} prices on the same day last year?")
+    elif "earlier today" in raw_query or "this morning" in raw_query or "pay double" in raw_query:
+        # Diurnal comparison → explain the evening peak pattern
+        questions.append(f"What is the typical {region} evening peak price from 5–8pm?")
+    elif intent in ("lookup", "comparison"):
+        questions.append(f"Why is {region} at this price right now?")
+    elif intent == "explanation" and price and price > 150:
+        questions.append(f"How long will {region} stay above $150/MWh?")
+    elif intent == "explanation":
+        questions.append(f"What is the {region} price forecast for the next hour?")
+    elif intent in ("action_recommendation",) and requested_output == "fuel_source_recommendation":
+        questions.append(f"What is the current {region} spot price and which fuel is marginal?")
+    elif intent in ("action_recommendation",):
+        questions.append(f"What is the current {region} spot price?")
+    else:
+        questions.append(f"Why is {region} at this price right now?")
+
+    # Q2: Forward-looking context — tied to the specific question asked
+    if _future_date:
+        questions.append(f"What is the typical June price range in {region} — P10, P50, P90?")
+    elif "earlier today" in raw_query or "this morning" in raw_query:
+        questions.append(f"Is the current {region} price cheap or expensive vs last year?")
+    elif price and price > 200:
+        questions.append(f"Will {region} price drop below $200 in the next 30 minutes?")
+    elif price and price < 60:
+        questions.append(f"Is {region} unusually cheap right now — how does it compare to last year?")
     else:
         questions.append(f"What is the {region} price forecast for the next 30 minutes?")
 
-    # Q3: Evidence gap or cross-region
-    missing = [m for s in (factual.answer_sections or []) if s.get("title") == "Missing"
-               for m in s.get("items", [])]
-    if missing:
-        gap = missing[0].replace("_", " ")
-        questions.append(f"Why is {gap} missing and does it matter?")
+    # Q3: Actionable / cross-region — real decision value
+    if _future_date:
+        questions.append(f"What weather is forecast for {region} next week that could affect prices?")
+    elif "earlier today" in raw_query or "pay double" in raw_query:
+        questions.append("Should I shift my load to morning hours when solar is generating?")
     elif intent == "comparison":
-        questions.append("Which state has the cheapest energy to buy right now?")
+        questions.append("Which NEM state has the cheapest energy to buy right now?")
     elif hist_dist and hist_dist.get("classification") in ("elevated", "high", "spike"):
-        questions.append(f"Is {region} more expensive than usual this time of day?")
+        questions.append(f"Is this {region} price spike going to persist or resolve soon?")
+    elif requested_output == "fuel_source_recommendation":
+        questions.append("When does wind generation typically drop and push prices up in NSW?")
     else:
-        questions.append(f"Compare {region} to all other NEM states now.")
+        questions.append(f"Compare {region} to all other NEM states right now.")
 
     return questions[:3]
 

@@ -53,6 +53,9 @@ export function gridverdictApp() {
     messages: [],
     queryText: '',
     queryLoading: false,
+    queryProgress: [],       // steps from /progress endpoint
+    queryElapsed: 0,         // seconds since query submitted
+    _progressTimer: null,    // setInterval handle
 
     // ── Viewport ──────────────────────────────────────────────────
     viewport: {
@@ -310,9 +313,26 @@ export function gridverdictApp() {
       this.queryText = '';
       this.queryLoading = true;
       this.viewport.loading = true;
+      this.queryProgress = [];
+      this.queryElapsed = 0;
 
       this.messages.push({ role: 'user', text, id: 'tmp-' + Date.now() });
       this._scrollMessages();
+
+      // Poll progress every 500ms — show messages after 5s elapsed
+      const _progressStart = Date.now();
+      this._progressTimer = setInterval(async () => {
+        this.queryElapsed = (Date.now() - _progressStart) / 1000;
+        try {
+          const prog = await fetch(`/api/sessions/${this.currentSessionId}/progress`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('gv_token') || ''}` },
+          });
+          if (prog.ok) {
+            const data = await prog.json();
+            if (data.steps && data.steps.length) this.queryProgress = data.steps;
+          }
+        } catch (_) { /* non-fatal — just don't update */ }
+      }, 500);
 
       try {
         const resp = await api.submitQuery(this.currentSessionId, text, this.region);
@@ -364,6 +384,10 @@ export function gridverdictApp() {
         this.messages.push({ role: 'system', text: `Error: ${err.message}`, id: 'err-' + Date.now() });
         this.showToast(err.message, 'error');
       } finally {
+        clearInterval(this._progressTimer);
+        this._progressTimer = null;
+        this.queryProgress = [];
+        this.queryElapsed = 0;
         this.queryLoading = false;
         this.viewport.loading = false;
       }

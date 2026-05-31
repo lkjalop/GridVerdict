@@ -212,8 +212,26 @@
 
         <template x-if="queryLoading">
           <div style="display:flex;justify-content:flex-start;">
-            <div class="bubble bubble--assistant" style="display:flex;align-items:center;gap:8px;color:var(--text-muted);">
-              <span class="spinner"></span> Analysing…
+            <div class="bubble bubble--assistant" style="color:var(--text-muted);">
+              <!-- Simple spinner for first 5s -->
+              <template x-if="queryElapsed < 5 || queryProgress.length === 0">
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <span class="spinner"></span> Analysing…
+                </div>
+              </template>
+              <!-- After 5s: show live pipeline steps -->
+              <template x-if="queryElapsed >= 5 && queryProgress.length > 0">
+                <div style="font-size:12px;line-height:1.7;">
+                  <template x-for="(step, i) in queryProgress" :key="step.step">
+                    <div style="display:flex;align-items:center;gap:6px;"
+                         :style="i === queryProgress.length - 1 ? 'color:var(--text-primary)' : 'opacity:0.55'">
+                      <span x-show="i === queryProgress.length - 1" class="spinner" style="width:10px;height:10px;border-width:1.5px;flex-shrink:0;"></span>
+                      <span x-show="i < queryProgress.length - 1" style="width:10px;flex-shrink:0;text-align:center;font-size:10px;">✓</span>
+                      <span x-text="step.message"></span>
+                    </div>
+                  </template>
+                </div>
+              </template>
             </div>
           </div>
         </template>
