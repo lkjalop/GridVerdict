@@ -51,6 +51,8 @@ def plan_answer(
     provenance: list[dict[str, Any]] | None = None,
     fuel_mix: dict[str, Any] | None = None,
     hist_dist: dict[str, Any] | None = None,
+    opennem_trend: Any | None = None,
+    opennem_diurnal: Any | None = None,
 ) -> PlannedAnswer:
     """Build concise visible answer sections from approved evidence."""
     requested = (sources.decomp.requested_output or "").lower()
@@ -59,9 +61,9 @@ def plan_answer(
     if requested == "data_freshness_status" or "stale" in query:
         return _plan_data_status(sources, factual, evidence_quality, provenance)
     if requested == "diurnal_analysis":
-        return _plan_diurnal_analysis(sources, factual)
+        return _plan_diurnal_analysis(sources, factual, opennem_diurnal=opennem_diurnal)
     if requested == "trend_analysis":
-        return _plan_trend_analysis(sources, factual, hist_dist=hist_dist)
+        return _plan_trend_analysis(sources, factual, hist_dist=hist_dist, opennem_trend=opennem_trend)
     if requested == "regional_comparison":
         return _plan_comparison(sources, factual)
     if requested == "historical_analog_outcome":
@@ -732,8 +734,14 @@ def _plan_future_date_forecast(
     )
 
 
-def _plan_diurnal_analysis(sources: WhySources, factual: FactualVerdict) -> PlannedAnswer:
-    """Time-of-day price pattern — the NEM's daily cycle by fuel and season."""
+def _plan_diurnal_analysis(
+    sources: WhySources,
+    factual: FactualVerdict,
+    *,
+    opennem_diurnal: Any | None = None,
+) -> PlannedAnswer:
+    """Time-of-day price pattern — uses real OpenNEM hourly data when available,
+    otherwise falls back to seasonal NEM structural norms."""
     c = sources.current
     region = c.region
     query = (sources.decomp.raw_query or "").lower()
@@ -752,7 +760,49 @@ def _plan_diurnal_analysis(sources: WhySources, factual: FactualVerdict) -> Plan
             season_label, season_note = lbl, note
             break
 
-    # Season-specific price bands by time of day
+    # ── Path A: real OpenNEM hourly data ─────────────────────────────────────
+    _onem = opennem_diurnal
+    if _onem is not None and getattr(_onem, "available", False) and _onem.hours:
+        from app.mcp.opennem_client import format_diurnal_table
+        _real_tbl = format_diurnal_table(_onem)
+        _cheapest = _onem.cheapest_hour
+        _peak = _onem.peak_hour
+        direct = [
+            f"Real hourly price data for {region} — last {_onem.days_sampled} days (OpenNEM):",
+            f"Current: ${c.price_rrp:.2f}/MWh ({c.regime}, demand {c.demand_mw:,.0f} MW).",
+        ] + _real_tbl
+
+        key_evidence = [
+            f"Source: OpenNEM/OpenElectricity API — {_onem.days_sampled} days of hourly {region} prices",
+            f"Cheapest hour: {_cheapest:02d}:00 AEST — buy here for lowest cost exposure",
+            f"Peak hour: {_peak:02d}:00 AEST — highest average price, avoid unhedged exposure",
+            f"Current spot: ${c.price_rrp:.2f}/MWh ({c.regime})",
+        ]
+        if sources.weather.available:
+            key_evidence.append(_weather_line(sources))
+
+        missing = ["AEMO DISPATCHLOAD by fuel — would show coal/gas/wind MW per hour (not yet ingested)"]
+
+        return PlannedAnswer(
+            headline=f"{region} diurnal price cycle — real data, last {_onem.days_sampled} days",
+            direct_answer=direct,
+            key_evidence=key_evidence,
+            drivers=[
+                "Solar generation (zero fuel cost) suppresses midday prices — typically cheapest 10am–3pm.",
+                "Coal and gas are price-setters when solar is absent: morning 6–9am and evening 6–9pm.",
+                f"In {season_label}: {season_note}",
+                "Wind is weather-dependent — high-wind days keep prices low even in peak hours.",
+            ],
+            continuation=[
+                f"For seasonal comparison: ask 'How does the {season_label} pattern compare to Summer in {region}?'",
+                f"For live forecast: ask 'What is the price forecast for the next 30 minutes?'",
+                f"For monthly trend: ask 'What is the annual price trend for {region}?'",
+            ],
+            missing=missing,
+            details=_details(sources, factual),
+        )
+
+    # ── Path B: seasonal norms fallback ──────────────────────────────────────
     _bands = {
         "Autumn":  [("6am–10am", "Solar rising + wind", "Wind/solar",  "$20–50"),
                     ("10am–3pm", "Solar peak",           "Solar",       "$15–40"),
@@ -776,45 +826,40 @@ def _plan_diurnal_analysis(sources: WhySources, factual: FactualVerdict) -> Plan
                     ("9pm–6am",  "Overnight (cooler)",    "Coal/hydro",  "$50–120")],
     }
     bands = _bands.get(season_label, _bands["Autumn"])
-
-    tbl = [f"Typical {region} diurnal price pattern — {season_label} ({season_note}):"]
-    tbl.append(f"  {'TIME':12} {'CONDITIONS':28} {'MARGINAL SOURCE':16} TYPICAL RANGE")
+    tbl = [f"Seasonal estimate — {region} {season_label} ({season_note}):"]
+    tbl.append(f"  {'TIME':12} {'CONDITIONS':28} {'SOURCE':16} TYPICAL RANGE")
     tbl.append(f"  {'─'*75}")
     for time_band, conditions, source, price_range in bands:
         tbl.append(f"  {time_band:12} {conditions:28} {source:16} {price_range}")
 
     direct = [
         f"NEM prices follow a predictable daily cycle driven by solar generation and demand peaks.",
-        f"Current: ${c.price_rrp:.2f}/MWh at {c.demand_mw:.0f} MW demand ({c.regime} regime) — "
-        f"use this as your baseline for the pattern below.",
+        f"Current: ${c.price_rrp:.2f}/MWh at {c.demand_mw:,.0f} MW demand ({c.regime} regime).",
     ] + tbl + [
-        f"Key driver: solar generation depresses midday prices; coal/gas set the price when solar is absent.",
+        "Key driver: solar generation depresses midday prices; coal/gas set price when solar is absent.",
     ]
 
     return PlannedAnswer(
-        headline=f"{region} diurnal price cycle — {season_label} pattern",
+        headline=f"{region} diurnal price cycle — {season_label} seasonal estimate",
         direct_answer=direct,
         key_evidence=[
-            f"Current spot: ${c.price_rrp:.2f}/MWh ({c.regime}, demand {c.demand_mw:.0f} MW)",
+            f"Current spot: ${c.price_rrp:.2f}/MWh ({c.regime}, demand {c.demand_mw:,.0f} MW)",
             f"Season: {season_label} — {season_note}",
-            f"Pattern source: NEM structural mechanics (solar penetration + thermal dispatch)",
-            f"Live weather: {'available — wind/temp may shift bands' if sources.weather.available else 'not fetched for this query'}",
+            "Pattern: NEM structural mechanics (solar penetration + thermal dispatch order)",
+            f"Live weather: {'available — wind/temp may shift bands' if sources.weather.available else 'not fetched'}",
         ],
         drivers=[
-            "Solar generation is the dominant intraday price driver — zero fuel cost suppresses midday.",
-            "Gas and coal are price-setters in the morning (low sun) and evening (no sun, high demand).",
-            "Wind is weather-dependent — high wind days can keep prices low even in peak hours.",
-            "Interconnector flows can narrow or widen the gap between regions.",
+            "Solar generation is the dominant intraday driver — zero fuel cost suppresses midday.",
+            "Gas and coal set the price in morning (low sun) and evening (no sun, high demand).",
+            "Wind is weather-dependent — high-wind days keep prices low even during peaks.",
+            "Interconnector flows narrow or widen the gap between regions.",
         ],
         continuation=[
-            f"For actual historical hourly data: ask 'What were NSW1 hourly prices last June?'",
-            f"For seasonal comparison: ask 'How does the Winter vs Summer pattern differ in {region}?'",
+            f"For real hourly data: ask 'When is the cheapest time to buy power in {region}?' (pulls OpenNEM)",
+            f"For seasonal comparison: ask 'How does Winter vs Summer differ in {region}?'",
             f"For live forecast: ask 'What is the price forecast for the next 30 minutes?'",
         ],
-        missing=[
-            "OpenNEM hourly generation data (would show actual MW by fuel for each hour band)",
-            "AEMO DISPATCHLOAD aggregated by hour (not yet ingested)",
-        ],
+        missing=["OpenNEM hourly data (fetch timed out or unavailable — retry to get real data)"],
         details=_details(sources, factual),
     )
 
@@ -824,17 +869,16 @@ def _plan_trend_analysis(
     factual: FactualVerdict,
     *,
     hist_dist: dict[str, Any] | None = None,
+    opennem_trend: Any | None = None,
 ) -> PlannedAnswer:
-    """Monthly / annual / year-over-year price trend analysis."""
+    """Monthly / annual price trend — uses real OpenNEM monthly data when available."""
     c = sources.current
     region = c.region
     query = (sources.decomp.raw_query or "").lower()
 
-    # Extract period hint from query
+    # Period label from query text
     if any(w in query for w in ["last year", "past year", "12 month", "annual"]):
         period_label = "last 12 months"
-    elif any(w in query for w in ["last month", "past month"]):
-        period_label = "last 30 days"
     elif any(w in query for w in ["last quarter", "past quarter", "quarterly"]):
         period_label = "last 3 months"
     elif any(w in query for w in ["2024", "2023", "2022"]):
@@ -842,9 +886,61 @@ def _plan_trend_analysis(
         _yr = _re.search(r'20(2[0-4])', query)
         period_label = f"calendar year {_yr.group(0)}" if _yr else "the requested period"
     else:
-        period_label = "the requested period"
+        period_label = "last 12 months"
 
-    # Use hist_dist data if available
+    _structural = [
+        "NEM wholesale prices have been structurally declining in solar hours (10am–3pm) as PV penetration rises.",
+        "Evening peak (6–9pm) and overnight prices remain coal/gas-driven and less affected by solar.",
+        "Year-over-year variation is driven by: fuel costs (gas/coal), hydro availability (drought risk), renewable build rate.",
+        "2022–23 prices were elevated by the gas crisis (LNG export parity). 2024 shows moderation.",
+    ]
+
+    # ── Path A: real OpenNEM monthly data ────────────────────────────────────
+    _onem = opennem_trend
+    if _onem is not None and getattr(_onem, "available", False) and _onem.months:
+        from app.mcp.opennem_client import format_monthly_trend_table
+        _tbl = format_monthly_trend_table(_onem)
+
+        _yoy_str = ""
+        if _onem.yoy_change_pct is not None:
+            _dir = "up" if _onem.yoy_change_pct > 0 else "down"
+            _yoy_str = f" — {abs(_onem.yoy_change_pct):.1f}% {_dir} year-on-year"
+
+        vs_now = ""
+        if _onem.twelve_month_avg and c.price_rrp:
+            _vs_pct = (c.price_rrp - _onem.twelve_month_avg) / _onem.twelve_month_avg * 100
+            _vs_dir = "above" if _vs_pct > 0 else "below"
+            vs_now = (
+                f"Current spot ${c.price_rrp:.2f}/MWh is "
+                f"{abs(_vs_pct):.0f}% {_vs_dir} the 12-month average "
+                f"(${_onem.twelve_month_avg:.0f}/MWh){_yoy_str}."
+            )
+
+        direct = [vs_now] + _tbl if vs_now else _tbl
+
+        key_evidence = [
+            f"Source: OpenNEM/OpenElectricity API — real monthly {region} prices",
+            f"12-month average: ${_onem.twelve_month_avg:.0f}/MWh" if _onem.twelve_month_avg else "",
+            f"Renewable mix (latest): {_onem.renewable_latest_pct:.0f}%" if _onem.renewable_latest_pct else "",
+            f"Current spot: ${c.price_rrp:.2f}/MWh ({c.regime})",
+        ]
+        key_evidence = [e for e in key_evidence if e]
+
+        return PlannedAnswer(
+            headline=f"{region} price trend — {period_label} (real OpenNEM data)",
+            direct_answer=direct,
+            key_evidence=key_evidence,
+            drivers=_structural,
+            continuation=[
+                f"For daily price pattern: ask 'What is the typical diurnal pattern for {region}?'",
+                f"For fuel source breakdown: ask 'Which fuel type has driven NSW prices this year?'",
+                f"For a specific month: ask 'Why were {region} prices elevated in June 2025?'",
+            ],
+            missing=["By-fuel monthly breakdown (requires OpenNEM facilities endpoint — auth needed)"],
+            details=_details(sources, factual, hist_dist=hist_dist),
+        )
+
+    # ── Path B: DB hist_dist fallback ─────────────────────────────────────────
     _h = hist_dist or {}
     _has_data = bool(_h.get("available") and _h.get("median") is not None)
     _median = _h.get("median", 0)
@@ -856,38 +952,30 @@ def _plan_trend_analysis(
     if _has_data:
         vs_now = c.price_rrp - _median
         vs_pct = (vs_now / _median * 100) if _median else 0
-        direction = "above" if vs_now > 0 else "below"
         trend_summary = (
             f"{region} — {_period_db}: median ${_median:.0f}/MWh "
             f"(P10 ${_p10:.0f} | P90 ${_p90:.0f}), n={_count:,} intervals."
         )
         vs_summary = (
-            f"Current spot ${c.price_rrp:.2f}/MWh is {abs(vs_pct):.0f}% "
-            f"{direction} the {_period_db} median."
+            f"Current ${c.price_rrp:.2f}/MWh is "
+            f"{'above' if vs_now > 0 else 'below'} the median by "
+            f"{abs(vs_pct):.0f}%."
         )
     else:
-        trend_summary = f"Historical price distribution for {period_label} — data not available for this query."
-        vs_summary = f"Current spot: ${c.price_rrp:.2f}/MWh ({c.regime} regime)."
-
-    # Structural trend context (known NEM facts)
-    _structural = [
-        "NEM wholesale prices have been structurally declining in solar hours (10am–3pm) as PV penetration rises.",
-        "Evening peak (6–9pm) and overnight prices remain coal/gas-driven and less affected by solar.",
-        "Year-over-year variation is driven by: fuel costs (gas/coal), hydro availability (drought risk), renewable build rate.",
-        "2022–23 prices were elevated by the gas crisis (LNG export parity). 2024 shows moderation.",
-    ]
+        trend_summary = f"Historical distribution for {period_label}: no DB data matched this hour/season."
+        vs_summary = f"Current spot: ${c.price_rrp:.2f}/MWh ({c.regime})."
 
     return PlannedAnswer(
         headline=f"{region} price trend — {period_label}",
         direct_answer=[
             trend_summary,
             vs_summary,
-            f"Note: monthly breakdown and by-fuel time series require OpenNEM API integration (not yet fetched).",
+            "Monthly table: OpenNEM API unavailable — showing DB archive summary only.",
         ],
         key_evidence=(
             [trend_summary, f"P10/P50/P90: ${_p10:.0f} / ${_median:.0f} / ${_p90:.0f}/MWh ({_count:,} intervals)"]
             if _has_data else
-            [f"Current spot: ${c.price_rrp:.2f}/MWh", "Historical distribution: unavailable — DB query returned no rows"]
+            [f"Current: ${c.price_rrp:.2f}/MWh", "DB historical distribution: unavailable"]
         ),
         drivers=_structural,
         continuation=[

@@ -744,6 +744,24 @@ async def submit_query(
         except Exception as _bom_err:
             logger.debug("BOM 7-day forecast inject failed (non-fatal): %s", _bom_err)
 
+    # --- 2c6. OpenNEM trend/diurnal data — real monthly + hourly data from OpenElectricity API ---
+    opennem_trend: "Any | None" = None   # TrendContext
+    opennem_diurnal: "Any | None" = None  # DiurnalContext
+    _wants_opennem = decomp.requested_output in ("trend_analysis", "diurnal_analysis")
+    if _wants_opennem:
+        try:
+            _progress(session_id, "opennem", "OpenNEM: fetching real market data…", _t0)
+            from app.mcp.opennem_client import get_trend_context, get_diurnal_context
+            import asyncio as _asyncio
+            if decomp.requested_output == "trend_analysis":
+                opennem_trend = await _asyncio.wait_for(get_trend_context(region), timeout=8.0)
+                _sg_sources.append("OPENNEM_TREND")
+            else:
+                opennem_diurnal = await _asyncio.wait_for(get_diurnal_context(region), timeout=8.0)
+                _sg_sources.append("OPENNEM_DIURNAL")
+        except Exception as _onem_err:
+            logger.debug("OpenNEM fetch failed (non-fatal): %s", _onem_err)
+
     # --- 2d. Historical price distribution — for "is this cheap vs last year?" queries ---
     hist_dist: dict | None = None
     _has_hist_sq = any(
@@ -978,6 +996,8 @@ async def submit_query(
                 provenance=provenance,
                 fuel_mix=fuel_mix,
                 hist_dist=hist_dist,
+                opennem_trend=opennem_trend,
+                opennem_diurnal=opennem_diurnal,
             ),
         )
     except Exception as exc:
