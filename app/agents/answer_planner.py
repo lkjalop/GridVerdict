@@ -142,8 +142,8 @@ def _plan_multi_part(
             )
             if c.demand_mw and c.availability_mw:
                 sections_evidence.append(
-                    f"Demand {c.demand_mw:.0f} MW vs availability {c.availability_mw:.0f} MW "
-                    f"(headroom {max(c.availability_mw - c.demand_mw, 0):.0f} MW)."
+                    f"Demand {c.demand_mw:,.0f} MW vs available {c.availability_mw:,.0f} MW — "
+                    f"{_headroom_str(max(c.availability_mw - c.demand_mw, 0), c.demand_mw)}."
                 )
 
         elif sq_type == "fuel_source_comparison":
@@ -237,13 +237,79 @@ def apply_plan_to_verdict(factual: FactualVerdict, plan: PlannedAnswer) -> Factu
     })
 
 
+_NEM_GLOSSARY: dict[str, str] = {
+    "headroom": (
+        "Headroom = available generation − current demand. "
+        "It's the grid's spare capacity buffer. "
+        "High headroom (>5,000 MW) → generators compete → low prices. "
+        "Low headroom (<1,000 MW) → generators can bid high → spike risk. "
+        "Think of it like spare lanes on a highway: more lanes = smoother traffic."
+    ),
+    "fcas": (
+        "FCAS = Frequency Control Ancillary Services. "
+        "The grid must run at exactly 50 Hz. When a large generator trips, frequency drops in seconds. "
+        "FCAS providers (hydro, batteries, gas peakers) are pre-contracted to inject or absorb power "
+        "within 6–60 seconds. FCAS prices spike when the grid is stressed or after major trips."
+    ),
+    "mtpasa": (
+        "MTPASA = Medium-Term Projected Assessment of System Adequacy. "
+        "AEMO publishes this weekly — it forecasts whether the grid has enough generation "
+        "over the next 2 years to meet peak demand. "
+        "High MTPASA 'reserve' = comfortable. Low reserve = risk of load shedding, and "
+        "forward contract prices tend to rise."
+    ),
+    "dispatch interval": (
+        "Every 5 minutes, AEMO runs a real-time auction called a dispatch interval. "
+        "Generators submit price/quantity bids, AEMO stacks them cheapest-first to meet demand, "
+        "and the most expensive bid needed to cover demand sets the spot price for that interval. "
+        "Six intervals make one 30-minute settlement period."
+    ),
+    "rrp": (
+        "RRP = Regional Reference Price — the spot price for a NEM region (NSW1, VIC1, etc). "
+        "It's the $/MWh price set by the dispatch auction every 5 minutes. "
+        "Large buyers (industrials, retailers) pay this price if they're on spot contracts."
+    ),
+    "marginal setter": (
+        "The marginal setter is the generator whose bid price determines the spot price. "
+        "AEMO stacks all offers cheapest-first. The last (most expensive) generator needed "
+        "to meet demand sets the price for everyone. "
+        "If coal bids $60 and the last needed unit is a gas peaker at $120, gas is the marginal setter."
+    ),
+    "interconnector": (
+        "Interconnectors are high-voltage transmission lines between NEM regions "
+        "(e.g., QNI connects Queensland and NSW, Heywood connects Victoria and SA). "
+        "When they're constrained (at capacity), regions can't share power and prices diverge. "
+        "SA is most prone to interconnector-driven spikes."
+    ),
+    "predispatch": (
+        "Predispatch is AEMO's 30-minute-ahead price forecast, updated every 5 minutes. "
+        "It shows where the market thinks prices are heading. "
+        "GridVerdict pulls predispatch as one of its forecast signals (alongside LNN/LEAR/QRA)."
+    ),
+}
+
+
+def _nem_glossary_answer(query: str) -> list[str]:
+    """Return plain-English definition if the query is asking what a NEM term means."""
+    lower = query.lower()
+    for term, definition in _NEM_GLOSSARY.items():
+        if term in lower:
+            return [f"NEM term — {term.upper()}: {definition}"]
+    return []
+
+
 def _plan_explanation(sources: WhySources, factual: FactualVerdict, *, include_forecast: bool) -> PlannedAnswer:
     c = sources.current
+    query = (sources.decomp.raw_query or "")
     headline = f"{c.region} price is {c.regime}, but the primary driver is not confirmed."
     _dispatch_tier = "[live]" if c.is_fresh else "[stale]"
     direct = [
-        f"{c.region} is ${c.price_rrp:.2f}/MWh {_dispatch_tier} with {c.headroom_mw:.0f} MW headroom.",
+        f"{c.region} is ${c.price_rrp:.2f}/MWh {_dispatch_tier} — {_headroom_str(c.headroom_mw, c.demand_mw)}.",
     ]
+    # Glossary inject — if user is asking what a NEM term means, lead with the definition
+    _gloss = _nem_glossary_answer(query)
+    if _gloss:
+        direct = _gloss + direct
 
     # E5: ChronoGraph regime state — change-point and quantile rank
     regime_state = getattr(c, "regime_state", None)
@@ -387,8 +453,8 @@ def _plan_weather_news_fallback(
     trend = _trend_line(sources)
 
     direct = [
-        f"{c.region} is ${c.price_rrp:.2f}/MWh [{'live' if c.is_fresh else 'stale'}], "
-        f"demand {c.demand_mw:.0f} MW, headroom {c.headroom_mw:.0f} MW.",
+        f"{c.region} is ${c.price_rrp:.2f}/MWh [{'live' if c.is_fresh else 'stale'}] — "
+        f"{_headroom_str(c.headroom_mw, c.demand_mw)}.",
     ]
     if trend:
         direct.append(trend)
@@ -478,7 +544,7 @@ def _plan_price_fluctuation(
     )
 
     evidence = [
-        f"Current dispatch: demand {c.demand_mw:.0f} MW, available generation {c.availability_mw:.0f} MW, headroom {c.headroom_mw:.0f} MW.",
+        f"Dispatch: demand {c.demand_mw:,.0f} MW, available {c.availability_mw:,.0f} MW — {_headroom_str(c.headroom_mw, c.demand_mw)}.",
     ]
     if sources.weather.available:
         evidence.append(_weather_line(sources))
@@ -1057,7 +1123,7 @@ def _plan_fuel_source(
 def _plan_portfolio_or_action(sources: WhySources, factual: FactualVerdict) -> PlannedAnswer:
     c = sources.current
     direct = [
-        f"Current market state: ${c.price_rrp:.2f}/MWh, {c.headroom_mw:.0f} MW headroom.",
+        f"Current market: ${c.price_rrp:.2f}/MWh — {_headroom_str(c.headroom_mw, c.demand_mw)}.",
         f"Suggested action label: {factual.action.value.replace('_', ' ')}.",
     ]
     evidence = [f"Confidence is {factual.confidence:.0%}; check missing-before-action items before acting."]
@@ -1175,8 +1241,8 @@ def _plan_historical_distribution(
 def _plan_lookup(sources: WhySources, factual: FactualVerdict) -> PlannedAnswer:
     c = sources.current
     direct = [
-        f"{c.region}: ${c.price_rrp:.2f}/MWh, demand {c.demand_mw:.0f} MW, headroom {c.headroom_mw:.0f} MW.",
-        f"Regime: {c.regime}.",
+        f"{c.region}: ${c.price_rrp:.2f}/MWh — {_headroom_str(c.headroom_mw, c.demand_mw)}.",
+        f"Demand: {c.demand_mw:,.0f} MW. Regime: {c.regime}.",
     ]
     # E5: Quantile rank for quick context on whether this price is unusual
     regime_state = getattr(c, "regime_state", None)
@@ -1285,6 +1351,26 @@ def _analog_outcome_line(sources: WhySources) -> str:
         return ""
     outcome = f" {a.outcome_summary}" if a.outcome_summary else ""
     return f"Historical analogs: {a.count} matched.{outcome}"
+
+
+def _headroom_str(headroom_mw: float, demand_mw: float | None = None) -> str:
+    """Format headroom with plain-English interpretation so non-engineers understand it.
+
+    Headroom = available generation − demand = the grid's spare capacity buffer.
+    Low headroom means generators are near their limit and can bid higher.
+    """
+    hw = headroom_mw
+    if hw >= 6000:
+        ctx = "ample — well below peak capacity, prices stable"
+    elif hw >= 3500:
+        ctx = "comfortable — normal operating zone"
+    elif hw >= 1500:
+        ctx = "moderate — watch for demand surge or generator trips"
+    elif hw >= 500:
+        ctx = "tight — elevated price risk if another unit trips"
+    else:
+        ctx = "critical — near grid limit, spike risk"
+    return f"{hw:,.0f} MW spare capacity ({ctx})"
 
 
 def _top_analog_lines(items: list[dict[str, Any]]) -> list[str]:

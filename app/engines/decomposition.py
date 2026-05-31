@@ -629,6 +629,21 @@ def _decompose_rules(
         intent = IntentLabel.LOOKUP
         confidence = 0.75
 
+    # NEM glossary queries — "what does headroom mean?", "explain FCAS", "what is MTPASA?"
+    _nem_term_query = any(p in lower for p in [
+        "what does", "what is", "explain", "define", "meaning of",
+        "what are", "how does it work",
+    ]) and any(t in lower for t in [
+        "headroom", "fcas", "mtpasa", "dispatch interval", "dispatch price",
+        "marginal setter", "settlement", "nem", "market cap", "voll",
+        "causer pays", "constraint", "interconnector", "p10", "p50", "p90",
+        "availability", "spot price", "rrp", "regional reference price",
+        "predispatch", "5-minute", "5 minute settlement",
+    ])
+    if _nem_term_query:
+        intent = IntentLabel.EXPLANATION
+        confidence = 0.82
+
     # Meta-questions about the platform itself
     _meta_phrases = [
         "how does this work", "how does gridverdict", "what is gridverdict",
