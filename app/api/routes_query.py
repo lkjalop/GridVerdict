@@ -791,6 +791,21 @@ async def submit_query(
         except Exception as exc:
             logger.debug("Historical price distribution unavailable (non-fatal): %s", exc)
 
+    # --- 2d-ii. Specific period stats — direct aggregate for "what was the average in July 2023?" ---
+    period_stats: dict | None = None
+    _period_sq = next(
+        (sq for sq in (decomp.sub_questions or []) if sq.get("type") == "specific_period_stats"),
+        None,
+    )
+    if _period_sq:
+        try:
+            from app.engines.historical_price import get_period_stats
+            period_stats = await get_period_stats(
+                db, region, _period_sq["start"], _period_sq["end"]
+            )
+        except Exception as exc:
+            logger.debug("Period stats unavailable (non-fatal): %s", exc)
+
     # --- 2e. Intraday price history — for "earlier today wind was $15, why pay double now?" ---
     intraday_prices: list[dict] = []
     _has_intraday_sq = any(
@@ -998,6 +1013,7 @@ async def submit_query(
                 hist_dist=hist_dist,
                 opennem_trend=opennem_trend,
                 opennem_diurnal=opennem_diurnal,
+                period_stats=period_stats,
             ),
         )
     except Exception as exc:
@@ -1057,6 +1073,7 @@ async def submit_query(
                         provenance=provenance,
                         fuel_mix=fuel_mix,
                         hist_dist=hist_dist,
+                        period_stats=period_stats,
                     ),
                 )
                 decomp = _patched_decomp

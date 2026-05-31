@@ -53,10 +53,20 @@ def plan_answer(
     hist_dist: dict[str, Any] | None = None,
     opennem_trend: Any | None = None,
     opennem_diurnal: Any | None = None,
+    period_stats: dict[str, Any] | None = None,
 ) -> PlannedAnswer:
     """Build concise visible answer sections from approved evidence."""
     requested = (sources.decomp.requested_output or "").lower()
     query = (sources.decomp.raw_query or "").lower()
+
+    # Specific past-month query ("What was the average NSW price in July 2023?")
+    # Triggered by a specific_period_stats sub_question (date range baked in at decomp time)
+    _has_period_sq = any(
+        sq.get("type") == "specific_period_stats"
+        for sq in (sources.decomp.sub_questions or [])
+    )
+    if _has_period_sq and period_stats and period_stats.get("available"):
+        return _plan_specific_period(sources, factual, period_stats, hist_dist)
 
     if requested == "data_freshness_status" or "stale" in query:
         return _plan_data_status(sources, factual, evidence_quality, provenance)
@@ -360,6 +370,77 @@ def _plan_explanation(sources: WhySources, factual: FactualVerdict, *, include_f
         continuation=continuation,
         missing=missing,
         details=_details(sources, factual),
+    )
+
+
+def _plan_specific_period(
+    sources: WhySources,
+    factual: FactualVerdict,
+    period_stats: dict[str, Any],
+    hist_dist: dict[str, Any] | None,
+) -> PlannedAnswer:
+    """Answer 'What was the average price in [specific month/year]?' from DB aggregate."""
+    region = sources.current.region
+    start = period_stats.get("start", "")
+    end   = period_stats.get("end", "")
+    mean  = period_stats.get("mean")
+    median = period_stats.get("median")
+    lo    = period_stats.get("min")
+    hi    = period_stats.get("max")
+    n     = period_stats.get("count", 0)
+
+    # Human-readable period label ("July 2023", "Oct 2024–Mar 2025", etc.)
+    try:
+        from datetime import date as _date
+        _s = _date.fromisoformat(start)
+        _e = _date.fromisoformat(end)
+        period_label = _s.strftime("%B %Y") if _s.month == _e.month and _s.year == _e.year else f"{_s.strftime('%b %Y')}–{_e.strftime('%b %Y')}"
+    except Exception:
+        period_label = f"{start} to {end}"
+
+    headline = (
+        f"{region} average spot price in {period_label}: **${mean:,.2f}/MWh** "
+        f"(median ${median:,.2f}, range ${lo:,.0f}–${hi:,.0f})"
+    ) if mean is not None else f"No {region} price data found for {period_label}."
+
+    # Optionally compare to 4-year history
+    hist_context = ""
+    _h = hist_dist or {}
+    if _h.get("available") and _h.get("median") and mean is not None:
+        _hmed = _h["median"]
+        _pct = ((mean - _hmed) / _hmed * 100) if _hmed else 0
+        _direction = "above" if _pct > 0 else "below"
+        hist_context = (
+            f" That's {abs(_pct):.0f}% {_direction} the 4-year historical median "
+            f"(${_hmed:,.2f}/MWh, {_h.get('period_label','available history')})."
+        )
+
+    hist_line = (
+        f"4-year median for comparison: ${_h['median']:,.2f}/MWh ({_h.get('period_label','')})."
+        if _h.get("available") and _h.get("median") else ""
+    )
+    return PlannedAnswer(
+        headline=headline + hist_context,
+        direct_answer=[headline + hist_context],
+        key_evidence=[
+            f"Source: AEMO MMSDM archive — {n:,} 5-minute dispatch intervals covering {period_label}.",
+            f"Mean ${mean:,.2f}/MWh · Median ${median:,.2f}/MWh · Range ${lo:,.0f}–${hi:,.0f}/MWh.",
+            *(  [hist_line] if hist_line else [] ),
+        ],
+        details={
+            "period_stats": period_stats,
+            "hist_dist": _h,
+            "specific_period": {
+                "period": period_label,
+                "region": region,
+                "mean_price": mean,
+                "median_price": median,
+                "min_price": lo,
+                "max_price": hi,
+                "interval_count": n,
+                "hist_median": (_h.get("median") if _h.get("available") else None),
+            },
+        },
     )
 
 

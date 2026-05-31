@@ -314,7 +314,10 @@ def _parse_llm_output(
         )
     except Exception as exc:
         logger.warning("LLM output parse failed (%s) — using rule-based fallback", exc)
-        return _decompose_rules(original_text, region_hint, query_id)
+        rule = _decompose_rules(original_text, region_hint, query_id)
+        # Ensure sub_questions are populated even on fallback (normally done by _merge_decompositions)
+        sub_questions = _classify_sub_questions(original_text.lower(), rule.requested_output or "")
+        return rule.model_copy(update={"sub_questions": sub_questions})
 
 
 def _merge_decompositions(
@@ -405,16 +408,37 @@ def _classify_sub_questions(lower: str, requested_output: str) -> list[dict]:
             questions.append({"type": "historical_price_distribution", "period": period})
             break
     # Specific past year/month → upgrade to full-archive lookback so backfilled data is reachable
-    if re.search(r'\b20(1[5-9]|2[0-5])\b', lower):
+    _year_re = re.search(r'\b20(1[5-9]|2[0-5])\b', lower)
+    if _year_re:
         _existing_dist = next(
             (q for q in questions if q.get("type") == "historical_price_distribution"), None
         )
         if _existing_dist:
-            # Upgrade any shorter period to all_time when a specific past year is present
             if _existing_dist.get("period") not in ("all_time", "multi_year"):
                 _existing_dist["period"] = "all_time"
         else:
             questions.append({"type": "historical_price_distribution", "period": "all_time"})
+
+    # Specific month+year → add targeted period sub-question with exact date range
+    _MONTH_RE2 = (
+        r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?'
+        r'|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
+    )
+    _YEAR_CAP2 = r'(20[12][0-9])'
+    _mym2 = re.search(rf'{_MONTH_RE2}\s+{_YEAR_CAP2}|{_YEAR_CAP2}\s+{_MONTH_RE2}', lower, re.IGNORECASE)
+    if _mym2 and not any(q.get("type") == "specific_period_stats" for q in questions):
+        import calendar as _cal2
+        _MONTH_MAP2 = {'jan':1,'feb':2,'mar':3,'apr':4,'may':5,'jun':6,'jul':7,'aug':8,'sep':9,'oct':10,'nov':11,'dec':12}
+        _mn2 = (_mym2.group(1) or _mym2.group(4) or '')[:3].lower()
+        _yr2 = int(_mym2.group(2) or _mym2.group(3) or 0)
+        _mm2 = _MONTH_MAP2.get(_mn2)
+        if _mm2 and _yr2:
+            _last2 = _cal2.monthrange(_yr2, _mm2)[1]
+            questions.append({
+                "type": "specific_period_stats",
+                "start": f"{_yr2}-{_mm2:02d}-01",
+                "end":   f"{_yr2}-{_mm2:02d}-{_last2:02d}",
+            })
 
     # Fuel source comparison
     fuels_mentioned = [f for f in ["coal", "solar", "hydro", "wind", "gas", "battery"] if f in lower]
@@ -1089,6 +1113,31 @@ def _decompose_rules(
     # Past calendar year reference — "june 2024", "prices in 2023", "Q3 2022"
     # Catches cases where year and month are separated ("in june 2024" ≠ "in 2024")
     _has_past_year_ref = bool(re.search(r'\b20(1[5-9]|2[0-5])\b', lower))
+    # Extract specific month+year for direct period queries ("July 2023", "October 2024")
+    _MONTH_RE = (
+        r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?'
+        r'|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
+    )
+    _YEAR_CAP = r'(20[12][0-9])'
+    _mym = re.search(rf'{_MONTH_RE}\s+{_YEAR_CAP}|{_YEAR_CAP}\s+{_MONTH_RE}', lower, re.IGNORECASE)
+    _specific_period_start: str | None = None
+    _specific_period_end: str | None = None
+    if _mym:
+        import calendar as _cal
+        _MONTH_MAP = {
+            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+            'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+        }
+        # Group layout: (month_name, year) OR (year, month_name)
+        _mn = (_mym.group(1) or _mym.group(4) or '')[:3].lower()
+        _yr_str = _mym.group(2) or _mym.group(3) or ''
+        if _mn and _yr_str:
+            _mm = _MONTH_MAP.get(_mn)
+            _yy = int(_yr_str)
+            if _mm:
+                _last = _cal.monthrange(_yy, _mm)[1]
+                _specific_period_start = f"{_yy}-{_mm:02d}-01"
+                _specific_period_end   = f"{_yy}-{_mm:02d}-{_last:02d}"
     requires_history = False  # initialised here; |= below preserves year-detection True
     if _has_past_year_ref:
         requires_history = True
@@ -1157,9 +1206,16 @@ def _decompose_rules(
             **({"technologies": technologies} if technologies else {}),
         },
         time_range={
-            "type": "seasonal" if season_buckets else (
-                "historical" if requires_history else ("forecast" if requires_forecast else "current")
+            "type": (
+                "specific_month" if _specific_period_start else
+                "seasonal" if season_buckets else (
+                    "historical" if requires_history else (
+                        "forecast" if requires_forecast else "current"
+                    )
+                )
             ),
+            **({"start": _specific_period_start, "end": _specific_period_end}
+               if _specific_period_start else {}),
             **({"season_buckets": season_buckets} if season_buckets else {}),
             **({"future_date_ref": True} if _has_future_date else {}),
         },

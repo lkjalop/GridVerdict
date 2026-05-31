@@ -139,6 +139,57 @@ def _empty_result(period_label: str, hour_window: int) -> dict[str, Any]:
     }
 
 
+async def get_period_stats(
+    db: AsyncSession,
+    region: str,
+    start: str,
+    end: str,
+) -> dict[str, Any]:
+    """Direct price statistics for a specific date range (no time-of-day filtering).
+
+    Used for queries like 'What was the average NSW price in July 2023?' where the
+    user wants the aggregate for that exact period, not a rolling distribution.
+    """
+    try:
+        from datetime import date as _date, timedelta as _td, timezone as _tz, datetime as _dt
+        # asyncpg requires date/datetime objects, not strings
+        _start_dt = _dt.fromisoformat(start).replace(tzinfo=_tz.utc)
+        _end_excl_dt = (_date.fromisoformat(end) + _td(days=1))
+        _end_excl_dt = _dt(_end_excl_dt.year, _end_excl_dt.month, _end_excl_dt.day, tzinfo=_tz.utc)
+        result = await db.execute(
+            text("""
+                SELECT
+                    AVG(price_rrp)                                         AS mean,
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY price_rrp) AS median,
+                    MIN(price_rrp)                                          AS min_price,
+                    MAX(price_rrp)                                          AS max_price,
+                    COUNT(*)                                                AS n
+                FROM market_events
+                WHERE region = :region
+                  AND source  = 'AEMO_DISPATCH_PRICE'
+                  AND valid_time >= :start
+                  AND valid_time <  :end_excl
+            """),
+            {"region": region, "start": _start_dt, "end_excl": _end_excl_dt},
+        )
+        row = result.fetchone()
+        if not row or not row[4]:
+            return {"available": False, "start": start, "end": end}
+        return {
+            "available": True,
+            "mean":   round(float(row[0]), 2),
+            "median": round(float(row[1]), 2),
+            "min":    round(float(row[2]), 2),
+            "max":    round(float(row[3]), 2),
+            "count":  int(row[4]),
+            "start":  start,
+            "end":    end,
+        }
+    except Exception as exc:
+        logger.debug("get_period_stats failed: %s", exc)
+        return {"available": False, "start": start, "end": end}
+
+
 def classify_vs_history(current_price: float, dist: dict[str, Any]) -> str:
     """Classify current price relative to historical distribution.
 
