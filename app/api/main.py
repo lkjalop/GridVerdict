@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from app.api import routes_auth, routes_backtest, routes_commentary, routes_compliance, routes_constraints, routes_events, routes_health, routes_incidents, routes_market, routes_metrics, routes_models, routes_portfolio, routes_query, routes_rebid, routes_security, routes_sessions, routes_temporalrag, routes_trace
+from app.api import routes_auth, routes_backtest, routes_commentary, routes_compliance, routes_constraints, routes_events, routes_export, routes_health, routes_incidents, routes_market, routes_metrics, routes_models, routes_portfolio, routes_query, routes_rebid, routes_security, routes_sessions, routes_temporalrag, routes_trace
 from app.data.aemo_live_client import get_aemo_client
 from app.data.cache import get_cache
 from app.data.scheduler import start_scheduler, stop_scheduler
@@ -135,6 +135,7 @@ def create_app() -> FastAPI:
         routes_trace, routes_backtest, routes_constraints, routes_models, routes_rebid,
         routes_security, routes_events, routes_temporalrag, routes_incidents,
         routes_portfolio, routes_compliance, routes_commentary, routes_metrics,
+        routes_export,
     ]
     for _mod in _all_routers:
         app.include_router(_mod.router, prefix="/api")

@@ -395,3 +395,36 @@ class ObserverEvent(Base):
         comment="ISO 27001:2022 Annex A control reference (e.g. 'A.8.28') for primary signal",
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WeatherObservation(Base):
+    """Persisted weather consensus snapshot per NEM region, written every poll cycle.
+
+    Allows live feed enrichment to JOIN weather at a historical event's valid_time
+    rather than only the live consensus (which would be wrong for old events).
+    Upserts on (region, observed_at) so re-polling the same BOM interval is safe.
+    """
+    __tablename__ = "weather_observations"
+    __table_args__ = (
+        Index("ix_weather_obs_region_time", "region", "observed_at"),
+        UniqueConstraint("region", "observed_at", name="uq_weather_obs_region_time"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    region: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True,
+        comment="Observation timestamp from BOM/consensus — the time the weather IS FOR",
+    )
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    temperature_c: Mapped[float | None] = mapped_column(Float)
+    temp_deviation_c: Mapped[float | None] = mapped_column(
+        Float, comment="Degrees above/below monthly seasonal norm for this region"
+    )
+    humidity_pct: Mapped[float | None] = mapped_column(Float)
+    wind_speed_kmh: Mapped[float | None] = mapped_column(Float)
+    wind_gust_kmh: Mapped[float | None] = mapped_column(Float)
+    precipitation_mm: Mapped[float | None] = mapped_column(Float)
+    cloud_cover_pct: Mapped[float | None] = mapped_column(Float)
+    source_count: Mapped[int | None] = mapped_column(Integer, comment="Number of sources contributing to consensus")
+    raw_consensus: Mapped[dict] = mapped_column(JSON, default=dict)

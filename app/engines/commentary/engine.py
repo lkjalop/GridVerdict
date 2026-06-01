@@ -286,7 +286,7 @@ def _build_baseline_event(curr: "RegionSnapshot", notices: list[dict[str, Any]])
                 "note": "First snapshot after startup; not a material market-change alert.",
             }
         ],
-        missing_data=[] if notices else ["aemo_market_notice"],
+        missing_data=[],
         evidence_refs=evidence_refs,
         confidence=0.6,
         corroborations={"weather": False, "news": False, "notices": bool(notices)},

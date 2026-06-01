@@ -423,6 +423,49 @@ async def _job_dispatch_refresh() -> None:
         # Persist to DB — idempotent on repeated calls for same interval
         await _persist_dispatch_snapshot(snapshot)
 
+        # Wire interconnector binding + constraint violations → constraints_{region} cache.
+        # This is the missing link: CONSTRAINT_ACTIVE detection in commentary/detector.py
+        # reads constraints_{region} but nothing was writing it until now.
+        _IC_REGION_MAP: dict[str, list[str]] = {
+            "V-S-MNSP1": ["SA1", "VIC1"], "HEYWOOD": ["SA1", "VIC1"],
+            "N-Q-MNSP1": ["NSW1", "QLD1"], "QNI": ["NSW1", "QLD1"], "TERRANORA": ["NSW1", "QLD1"],
+            "N-Q-MNSP2": ["NSW1", "QLD1"],
+            "V-N-MNSP1": ["VIC1", "NSW1"],
+            "T-V-MNSP1": ["TAS1", "VIC1"], "BASSLINK": ["TAS1", "VIC1"],
+        }
+        _region_constraints: dict[str, list[dict]] = {r: [] for r in snapshot.regions}
+        for _ic in (getattr(snapshot, "interconnector_rows", None) or []):
+            _ic_id = (_ic.get("interconnector_id") or "").upper()
+            _binding = _ic.get("at_export_limit") or _ic.get("at_import_limit") or (
+                (_ic.get("violation_degree") or 0.0) > 0.0
+            )
+            if _binding:
+                _label = {
+                    "V-S-MNSP1": "Heywood (VIC↔SA)", "N-Q-MNSP1": "QNI (NSW↔QLD)",
+                    "V-N-MNSP1": "VIC–NSW", "T-V-MNSP1": "Basslink (TAS↔VIC)",
+                }.get(_ic_id, _ic_id)
+                for _r in _IC_REGION_MAP.get(_ic_id, []):
+                    if _r in _region_constraints:
+                        _region_constraints[_r].append({
+                            "constraint_id": _label,
+                            "flow_mw": _ic.get("metered_mw_flow"),
+                            "limit_mw": _ic.get("export_limit") or _ic.get("import_limit"),
+                            "source": "interconnector",
+                        })
+        for _crow in (getattr(snapshot, "constraint_rows", None) or []):
+            _cid = _crow.get("constraint_id") or ""
+            _upper = _cid.upper()
+            for _pfx, _r in [("N-", "NSW1"), ("V-", "VIC1"), ("Q-", "QLD1"), ("S-", "SA1"), ("T-", "TAS1")]:
+                if _upper.startswith(_pfx) and _r in _region_constraints:
+                    _region_constraints[_r].append({
+                        "constraint_id": _cid,
+                        "marginal_value": _crow.get("marginal_value"),
+                        "source": "constraint",
+                    })
+                    break
+        for _r, _clist in _region_constraints.items():
+            await cache.set(f"constraints_{_r}", _clist, ttl=120)
+
         # Feed LNN trainer buffer — pass enriched interval dict so v2 features fire
         from app.engines.forecasting.inference import feed_interval
         for region_code, dp in snapshot.regions.items():
@@ -781,13 +824,28 @@ async def _job_nem_news_refresh() -> None:
         _job_exit("nem_news_refresh")
 
 
+# Monthly mean temperatures (°C) per NEM region — used to compute temp deviation.
+# Sourced from BOM climate averages for the capital city of each region.
+_SEASONAL_TEMP_NORMS: dict[str, dict[int, float]] = {
+    "NSW1": {1: 26, 2: 26, 3: 24, 4: 20, 5: 16, 6: 13, 7: 12, 8: 14, 9: 17, 10: 20, 11: 23, 12: 25},
+    "VIC1": {1: 26, 2: 26, 3: 23, 4: 18, 5: 14, 6: 11, 7: 10, 8: 11, 9: 14, 10: 17, 11: 21, 12: 24},
+    "QLD1": {1: 30, 2: 30, 3: 28, 4: 26, 5: 23, 6: 20, 7: 19, 8: 21, 9: 24, 10: 28, 11: 30, 12: 31},
+    "SA1":  {1: 30, 2: 30, 3: 26, 4: 21, 5: 17, 6: 14, 7: 12, 8: 14, 9: 17, 10: 22, 11: 26, 12: 29},
+    "TAS1": {1: 21, 2: 21, 3: 19, 4: 15, 5: 12, 6: 9,  7: 8,  8: 9,  9: 12, 10: 15, 11: 17, 12: 19},
+}
+
+
 async def _job_weather_refresh() -> None:
-    """Fetch weather consensus for each NEM region into cache."""
+    """Fetch weather consensus for each NEM region — cache + persist to DB."""
     _job_enter("weather_refresh")
     try:
         import asyncio
+        from datetime import timezone as _tz
         from app.data.cache import get_cache
         from app.mcp.weather_client import WeatherConsensusClient
+        from app.db.session import db_session
+        from app.db.models import WeatherObservation
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
 
         client = WeatherConsensusClient()
         cache = get_cache()
@@ -797,12 +855,68 @@ async def _job_weather_refresh() -> None:
             return_exceptions=True,
         )
         ok = 0
+        db_rows: list[dict] = []
+        now = datetime.now(_tz.utc)
+
         for region, result in zip(regions, results):
-            if isinstance(result, dict):
-                await cache.set(f"weather_{region}", result)
-                ok += 1
+            if not isinstance(result, dict):
+                continue
+            await cache.set(f"weather_{region}", result)
+            ok += 1
+
+            # Build DB row — observed_at from consensus timestamp, fallback to now
+            consensus = result.get("consensus") or {}
+            obs_ts_str = result.get("observed_at") or result.get("timestamp")
+            try:
+                from datetime import datetime as _dt
+                obs_at = _dt.fromisoformat(obs_ts_str.replace("Z", "+00:00")) if obs_ts_str else now
+            except Exception:
+                obs_at = now
+
+            temp = consensus.get("temperature_c")
+            month = obs_at.month
+            norm = _SEASONAL_TEMP_NORMS.get(region, {}).get(month)
+            deviation = round(temp - norm, 2) if temp is not None and norm is not None else None
+
+            db_rows.append({
+                "region": region,
+                "observed_at": obs_at,
+                "fetched_at": now,
+                "temperature_c": temp,
+                "temp_deviation_c": deviation,
+                "humidity_pct": consensus.get("humidity_pct"),
+                "wind_speed_kmh": consensus.get("wind_speed_kmh"),
+                "wind_gust_kmh": consensus.get("wind_gust_kmh"),
+                "precipitation_mm": consensus.get("precipitation_mm"),
+                "cloud_cover_pct": consensus.get("cloud_cover_pct"),
+                "source_count": result.get("source_count"),
+                "raw_consensus": result,
+            })
+
+        if db_rows:
+            try:
+                async with db_session() as session:
+                    stmt = pg_insert(WeatherObservation).values(db_rows)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["region", "observed_at"],
+                        set_={
+                            "fetched_at": stmt.excluded.fetched_at,
+                            "temperature_c": stmt.excluded.temperature_c,
+                            "temp_deviation_c": stmt.excluded.temp_deviation_c,
+                            "humidity_pct": stmt.excluded.humidity_pct,
+                            "wind_speed_kmh": stmt.excluded.wind_speed_kmh,
+                            "cloud_cover_pct": stmt.excluded.cloud_cover_pct,
+                            "source_count": stmt.excluded.source_count,
+                            "raw_consensus": stmt.excluded.raw_consensus,
+                        },
+                    )
+                    await session.execute(stmt)
+                    await session.commit()
+            except Exception as db_exc:
+                logger.debug("Weather obs DB persist failed (non-fatal): %s", db_exc)
+
         _record_success("weather_refresh")
-        logger.debug("Weather refresh OK — %d/%d regions", ok, len(regions))
+        logger.debug("Weather refresh OK — %d/%d regions, %d persisted", ok, len(regions), len(db_rows))
     except Exception as exc:
         _record_failure("weather_refresh", exc)
         logger.debug("Weather refresh failed (non-fatal): %s", exc)

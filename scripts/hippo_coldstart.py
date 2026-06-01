@@ -13,8 +13,8 @@ Design:
 Usage:
     python -u scripts/hippo_coldstart.py [--days 30] [--region NSW1]
 
-Called by the FastAPI startup hook (app.api.main.lifespan) if
-GRIDVERDICT_HIPPOGRAPH_COLDSTART=true.
+The FastAPI startup hook (app.api.main.lifespan) calls rebuild_from_db()
+directly — this script is for manual runs or CI seeding, not startup.
 """
 from __future__ import annotations
 

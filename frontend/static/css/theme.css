@@ -1,4 +1,5 @@
-/* GridVerdict design tokens — dark terminal palette */
+/* GridVerdict design tokens — dark terminal palette (default) */
+/* Light mode: html[data-theme="light"] overrides below */
 :root {
   /* Backgrounds */
   --bg-base:      #0d0f14;
@@ -196,3 +197,187 @@ html, body {
 
 /* Select */
 .select { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-primary); padding: var(--sp-1) var(--sp-3); font-size: var(--font-size-sm); cursor: pointer; outline: none; }
+
+/* ── Light mode — GridVerdict brand palette ─────────────────────────
+   Off-white cream base · warm orange accent · mud-brown secondary
+   Dark greyish-blue borders/active states · muted green alt accent
+
+   Activation: add data-theme="light" to <html> element.
+   Toggle via Alpine: $el.closest('html').dataset.theme toggle
+──────────────────────────────────────────────────────────────────── */
+html[data-theme="light"] {
+  /* Backgrounds — warm linen/cream stack */
+  --bg-base:      #f5f1ea;   /* warm cream — main canvas */
+  --bg-panel:     #ede8df;   /* linen — sidebar, panels */
+  --bg-card:      #e7e1d6;   /* slightly darker linen — cards */
+  --bg-input:     #f0ece4;   /* near-white with warmth — inputs */
+  --bg-hover:     #ddd7cb;   /* hover state — muted mud */
+
+  /* Borders — warm brown / greyish-blue accent */
+  --border:        #c5b89d;   /* warm sand border */
+  --border-light:  #b5a88a;   /* stronger sand — dividers */
+  --border-subtle: #d8d0c2;   /* barely-there — section divisions */
+
+  /* Text — dark warm-grey stack */
+  --text-primary:   #1c1a17;   /* near-black with warmth */
+  --text-secondary: #544d42;   /* dark mud-brown */
+  --text-muted:     #8c8070;   /* mid mud — labels, timestamps */
+  --text-code:      #3a6b52;   /* muted forest green — data values */
+
+  /* Verdict accent colours — slightly muted for light bg */
+  --verdict-supported:    #1a9e4a;   /* confident green */
+  --verdict-low:          #c97a10;   /* amber-orange */
+  --verdict-insufficient: #c0392b;   /* clear red */
+  --verdict-clarify:      #4f52b8;   /* indigo */
+  --verdict-oos:          #7a7468;   /* muted grey-brown */
+
+  /* Regime colours */
+  --regime-normal:   #1a9e4a;
+  --regime-elevated: #c97a10;
+  --regime-spike:    #c0392b;
+  --regime-extreme:  #9b1c1c;
+
+  /* Action colours */
+  --action-dispatch: #1a9e4a;
+  --action-hold:     #4f52b8;
+  --action-charge:   #0e7490;
+  --action-monitor:  #c97a10;
+  --action-refuse:   #7a7468;
+
+  /* Confidence band */
+  --conf-high:     #1a9e4a;
+  --conf-medium:   #c97a10;
+  --conf-low:      #c0392b;
+  --conf-very-low: #7a7468;
+
+  /* Brand accent — the orange + greyish-blue pair */
+  --brand-orange:    #e07c3a;   /* primary brand accent */
+  --brand-blue-grey: #2d4a5a;   /* dark greyish-blue — borders, active */
+  --brand-green:     #3d6b5e;   /* muted green — alt accent */
+
+  /* Driver confidence tier colours */
+  --tier-confirmed:   #1a9e4a;
+  --tier-supported:   #2d4a5a;   /* brand blue-grey for supported */
+  --tier-plausible:   #c97a10;
+  --tier-unconfirmed: #8c8070;
+}
+
+/* Light mode component overrides */
+html[data-theme="light"] body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+}
+
+html[data-theme="light"] .card {
+  background: var(--bg-card);
+  border-color: var(--border);
+  box-shadow: 0 1px 3px rgba(0,0,0,.08);
+}
+
+html[data-theme="light"] .bubble--user {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+html[data-theme="light"] .bubble--assistant {
+  background: var(--bg-panel);
+  border-color: var(--border-light);
+}
+
+html[data-theme="light"] .input {
+  background: var(--bg-input);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+html[data-theme="light"] .input:focus {
+  border-color: var(--brand-blue-grey);
+  box-shadow: 0 0 0 2px rgba(45,74,90,.15);
+}
+
+html[data-theme="light"] .input::placeholder {
+  color: var(--text-muted);
+}
+
+html[data-theme="light"] .select {
+  background: var(--bg-input);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+html[data-theme="light"] .btn--primary {
+  background: rgba(224,124,58,.15);
+  color: var(--brand-orange);
+  border-color: rgba(224,124,58,.35);
+}
+
+html[data-theme="light"] .btn--primary:hover {
+  background: rgba(224,124,58,.25);
+}
+
+html[data-theme="light"] .btn--ghost {
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
+
+html[data-theme="light"] .btn--ghost:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+html[data-theme="light"] .session-item--active {
+  border-left-color: var(--brand-orange);
+  background: var(--bg-hover);
+}
+
+html[data-theme="light"] .ev-pill {
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text-code);
+}
+
+/* Tab nav active underline uses brand orange in light mode */
+html[data-theme="light"] [x-data] [aria-selected="true"],
+html[data-theme="light"] .tab--active {
+  border-bottom-color: var(--brand-orange) !important;
+  color: var(--brand-orange) !important;
+}
+
+/* Scrollbar — warm sand */
+html[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: var(--border);
+}
+
+html[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: var(--border-light);
+}
+
+/* Theme toggle button */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition);
+  letter-spacing: 0.04em;
+}
+.theme-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+html[data-theme="light"] .theme-toggle {
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+html[data-theme="light"] .theme-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--brand-blue-grey);
+}

@@ -543,3 +543,179 @@ def _db_datetime_param(dt: datetime) -> datetime | str:
     if get_settings().database_url.startswith("sqlite"):
         return dt.isoformat(sep=" ")
     return dt
+
+
+# ── Procurement windows endpoint ─────────────────────────────────────
+
+@router.get("/procurement-windows")
+async def get_procurement_windows(
+    region: str = Query(default="NSW1"),
+    user: TokenPayload = Depends(get_current_user),
+):
+    """Return cheapest buying windows based on 30-day historical hourly averages.
+
+    Used by the Portfolio tab Procurement Optimizer widget.  Returns:
+    - current_price + percentile rank vs 30-day distribution
+    - hourly_avg: 24 buckets with avg price, flagged cheapest/expensive
+    - cheapest_windows: top-3 recommended buying time windows
+    """
+    from sqlalchemy import select, func, extract
+    from app.db.session import db_session
+    from app.db.models import MarketEvent
+    from app.data.cache import get_cache
+
+    region = region.upper()
+    now = datetime.now(timezone.utc)
+    lookback = now - timedelta(days=30)
+
+    try:
+        # Get current price from cache
+        cache = get_cache()
+        snap = await cache.get("dispatch_snapshot") or {}
+        region_snap = (snap.get("regions") or {}).get(region, {})
+        current_price = float(region_snap.get("price_rrp") or 0.0)
+        regime = region_snap.get("regime", "")
+
+        async with db_session() as session:
+            # 30-day hourly averages
+            result = await session.execute(
+                select(
+                    extract("hour", MarketEvent.valid_time).label("hour"),
+                    func.avg(MarketEvent.price_rrp).label("avg"),
+                    func.min(MarketEvent.price_rrp).label("min"),
+                    func.max(MarketEvent.price_rrp).label("max"),
+                    func.count().label("n"),
+                )
+                .where(
+                    MarketEvent.source == "AEMO_DISPATCH_PRICE",
+                    MarketEvent.region == region,
+                    MarketEvent.valid_time >= lookback,
+                )
+                .group_by(extract("hour", MarketEvent.valid_time))
+                .order_by(extract("hour", MarketEvent.valid_time))
+            )
+            hourly = {int(r.hour): {"avg": float(r.avg), "min": float(r.min), "max": float(r.max), "n": r.n}
+                      for r in result.fetchall()}
+
+            # Percentile rank of current price
+            pct_result = await session.execute(
+                select(func.count())
+                .where(
+                    MarketEvent.source == "AEMO_DISPATCH_PRICE",
+                    MarketEvent.region == region,
+                    MarketEvent.valid_time >= lookback,
+                    MarketEvent.price_rrp <= current_price,
+                )
+            )
+            below = pct_result.scalar() or 0
+            total_result = await session.execute(
+                select(func.count())
+                .where(
+                    MarketEvent.source == "AEMO_DISPATCH_PRICE",
+                    MarketEvent.region == region,
+                    MarketEvent.valid_time >= lookback,
+                )
+            )
+            total = max(total_result.scalar() or 1, 1)
+            percentile_rank = round(below / total * 100)
+
+        if not hourly:
+            return {"region": region, "current_price": current_price, "regime": regime,
+                    "percentile_rank": percentile_rank, "hourly_avg": [], "cheapest_windows": []}
+
+        # Normalise for bar chart (pct = fraction of max avg price)
+        max_avg = max(h["avg"] for h in hourly.values()) or 1.0
+        sorted_avgs = sorted((h["avg"], hr) for hr, h in hourly.items())
+        cheap_hours = {hr for _, hr in sorted_avgs[:8]}   # cheapest 8 hours
+        expensive_hours = {hr for _, hr in sorted_avgs[-4:]}  # most expensive 4 hours
+
+        hourly_avg = [
+            {
+                "hour": hr,
+                "avg": round(hourly.get(hr, {}).get("avg", 0), 2),
+                "pct": round(hourly.get(hr, {}).get("avg", 0) / max_avg, 3),
+                "cheapest": hr in cheap_hours,
+                "expensive": hr in expensive_hours,
+            }
+            for hr in range(24)
+        ]
+
+        # Build recommended windows (group consecutive cheap hours)
+        windows: list[dict] = []
+        for start in [0, 2, 23, 1, 3, 22, 10, 11]:   # rough overnight/midday priorities
+            if start in cheap_hours:
+                avg_p = hourly.get(start, {}).get("avg", 0)
+                next_h = (start + 1) % 24
+                avg_p2 = hourly.get(next_h, {}).get("avg", 0)
+                window_avg = round((avg_p + avg_p2) / 2, 1)
+                label = f"{start:02d}:00–{(start+2)%24:02d}:00"
+                note = (
+                    "overnight baseload" if 0 <= start <= 5
+                    else "solar ramp" if 9 <= start <= 13
+                    else "early morning"
+                )
+                windows.append({"label": label, "avg_price": window_avg, "note": note})
+                if len(windows) >= 3:
+                    break
+
+        windows.sort(key=lambda w: w["avg_price"])
+        return {
+            "region": region,
+            "current_price": round(current_price, 2),
+            "regime": regime,
+            "percentile_rank": percentile_rank,
+            "hourly_avg": hourly_avg,
+            "cheapest_windows": windows[:3],
+        }
+    except Exception as exc:
+        logger.warning("Procurement windows failed for %s: %s", region, exc)
+        return {"region": region, "current_price": None, "percentile_rank": None,
+                "hourly_avg": [], "cheapest_windows": [], "error": str(exc)}
+
+
+# ── Causal chain endpoint ─────────────────────────────────────────────
+
+@router.get("/causal-chain")
+async def get_causal_chain(
+    region: str = Query(default="NSW1", description="NEM region"),
+    valid_time: str = Query(..., description="ISO-format dispatch interval e.g. 2026-06-01T10:35:00+00:00"),
+    price: float = Query(..., description="Spot price in $/MWh at that interval"),
+    user: TokenPayload = Depends(get_current_user),
+):
+    """Build a causal evidence chain: price → marginal fuel → demand driver → weather.
+
+    Called asynchronously by the frontend after the main query returns so it
+    does not add latency to the primary answer path.  Returns partial chains
+    gracefully when data is unavailable for the given interval.
+    """
+    from datetime import datetime as _dt
+    from app.db.session import db_session
+    from app.engines.why_evidence_chains import build_causal_chain
+
+    region = region.upper()
+
+    try:
+        vt = _dt.fromisoformat(valid_time.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail=f"Invalid valid_time: {valid_time!r}")
+
+    try:
+        async with db_session() as session:
+            chain = await build_causal_chain(
+                region=region,
+                valid_time=vt,
+                spot_price=float(price),
+                session=session,
+            )
+        return chain.to_dict()
+    except Exception as exc:
+        logger.warning("Causal chain build failed for %s@%s: %s", region, valid_time, exc)
+        return {
+            "region": region,
+            "valid_time": valid_time,
+            "spot_price": price,
+            "nodes": [],
+            "root_cause": "",
+            "confidence": "low",
+            "data_gaps": [f"Causal chain unavailable: {exc}"],
+        }

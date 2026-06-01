@@ -1022,7 +1022,7 @@ async def submit_query(
 
     # Sprint U: per-sub-question confidence — weakest sub-question drives headline
     try:
-        from app.agents.answer_planner import apply_sub_question_scores
+        from app.agents.planner_helpers import apply_sub_question_scores
         factual = apply_sub_question_scores(factual, why_sources)
     except Exception as exc:
         logger.warning("Sub-question scoring failed for %s: %s", query_id, exc)

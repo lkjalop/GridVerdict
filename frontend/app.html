@@ -6,6 +6,13 @@
   <title>GridVerdict</title>
   <link rel="stylesheet" href="/static/css/theme.css" />
   <link rel="stylesheet" href="/static/css/components.css" />
+  <script>
+    /* Restore theme before first paint — prevents flash of wrong theme */
+    (function() {
+      var t = localStorage.getItem('gv-theme');
+      if (t === 'light') document.documentElement.dataset.theme = 'light';
+    })();
+  </script>
 </head>
 <body>
 <div id="root"
@@ -86,10 +93,12 @@
       <div class="model-pills">
         <template x-for="[name, info] in Object.entries(modelStatus.models)" :key="name">
           <div class="model-pill"
-               :class="info.available ? 'model-pill--ok' : 'model-pill--fail'"
-               :title="`${name.toUpperCase()}: ${info.available ? 'available' : (info.reason || 'unavailable')}`">
+               :class="info.available ? (info.checkpoint_age_hours > 6 ? 'model-pill--warn' : 'model-pill--ok') : 'model-pill--fail'"
+               :title="info.available
+                 ? `${name.toUpperCase()}: trained ${info.checkpoint_age_hours != null ? info.checkpoint_age_hours + 'h ago' : ''} · ${info.trained_on_intervals || info.n_samples || '?'} intervals`
+                 : `${name.toUpperCase()}: ${info.reason || 'unavailable'}${info.buffer_intervals != null ? ' (' + info.buffer_intervals + '/' + info.required_intervals + ' intervals buffered)' : ''}`">
             <span x-text="name.toUpperCase()"></span>
-            <span x-text="info.available ? '✓' : '✗'"></span>
+            <span x-text="info.available ? (info.checkpoint_age_hours > 6 ? '~' : '✓') : '✗'"></span>
           </div>
         </template>
       </div>
@@ -116,6 +125,9 @@
         </svg>
       </button>
       <span style="font-size:12px;color:var(--text-muted);" x-text="auth.email"></span>
+      <button class="theme-toggle"
+        @click="document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light'; localStorage.setItem('gv-theme', document.documentElement.dataset.theme)"
+        x-text="document.documentElement.dataset.theme === 'light' ? '☾ Dark' : '☀ Light'">☀ Light</button>
       <button class="btn btn--ghost" style="font-size:12px;padding:4px 10px;" @click="doLogout()">Sign out</button>
     </div>
   </div>
@@ -628,6 +640,81 @@
                       <div style="font-size:12px;line-height:1.4;font-family:var(--font-mono);padding:3px 8px;border-radius:3px;"
                            :style="step.startsWith('✓') ? 'background:rgba(34,197,94,.08);color:#22c55e;' : step.startsWith('✗') ? 'background:rgba(239,68,68,.06);color:var(--text-secondary);' : 'color:var(--text-muted);font-style:italic;padding-left:0;'"
                            x-text="step"></div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Structured causal chain — lazy-loaded from /api/market/causal-chain -->
+              <template x-if="viewport.data.current_state?.price_rrp && viewport.data.current_state?.valid_time">
+                <div class="card" style="padding:0;"
+                     x-data="{
+                       chain: null, loading: false, err: null,
+                       async load() {
+                         if (this.chain || this.loading) return;
+                         this.loading = true;
+                         try {
+                           const cs = viewport.data.current_state;
+                           const r = await api('/api/market/causal-chain?' + new URLSearchParams({
+                             region: cs.region || selectedRegion,
+                             valid_time: cs.valid_time,
+                             price: cs.price_rrp,
+                           }));
+                           this.chain = r;
+                         } catch(e) { this.err = e.message; }
+                         this.loading = false;
+                       }
+                     }"
+                     x-init="load()">
+                  <div class="card__header">
+                    <span class="card__label">Why this price — causal chain</span>
+                    <template x-if="chain?.confidence">
+                      <span style="font-size:10px;padding:1px 6px;border-radius:3px;margin-left:8px;"
+                            :style="`background:${chain.confidence==='high'?'rgba(34,197,94,.1)':chain.confidence==='medium'?'rgba(245,158,11,.1)':'rgba(107,114,128,.1)'};color:${chain.confidence==='high'?'#22c55e':chain.confidence==='medium'?'#f59e0b':'#8b92a8'}`"
+                            x-text="chain.confidence + ' confidence'"></span>
+                    </template>
+                  </div>
+                  <div class="card__body">
+                    <template x-if="loading && !chain">
+                      <div style="font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:6px;"><span class="spinner"></span> Building causal chain…</div>
+                    </template>
+                    <template x-if="chain && chain.nodes?.length">
+                      <div style="display:flex;flex-direction:column;gap:4px;">
+                        <template x-if="chain.root_cause">
+                          <div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px;line-height:1.5;"
+                               x-text="chain.root_cause"></div>
+                        </template>
+                        <template x-for="(node, idx) in chain.nodes" :key="node.step">
+                          <div>
+                            <div style="display:flex;align-items:flex-start;gap:8px;padding:6px 8px;border-radius:4px;"
+                                 :style="`background:${node.tier==='confirmed'?'rgba(34,197,94,.07)':node.tier==='inferred'?'rgba(59,130,246,.07)':'rgba(107,114,128,.05)'};border:1px solid ${node.tier==='confirmed'?'rgba(34,197,94,.2)':node.tier==='inferred'?'rgba(59,130,246,.2)':'rgba(107,114,128,.15)'}`">
+                              <div style="flex-shrink:0;width:16px;text-align:center;font-size:11px;margin-top:1px;"
+                                   :style="`color:${node.tier==='confirmed'?'#22c55e':node.tier==='inferred'?'#60a5fa':'#8b92a8'}`"
+                                   x-text="node.tier==='confirmed'?'✓':node.tier==='inferred'?'~':'?'"></div>
+                              <div style="flex:1;min-width:0;">
+                                <div style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;">
+                                  <span style="font-size:11px;font-weight:600;color:var(--text-primary);" x-text="node.label"></span>
+                                  <span style="font-size:11px;font-family:var(--font-mono);color:var(--text-code);" x-text="node.value"></span>
+                                </div>
+                                <div style="font-size:10px;color:var(--text-muted);margin-top:2px;line-height:1.4;" x-text="node.detail"></div>
+                              </div>
+                            </div>
+                            <template x-if="idx < chain.nodes.length - 1">
+                              <div style="padding-left:24px;font-size:10px;color:var(--text-muted);font-style:italic;margin:1px 0;"
+                                   x-text="node.arrow + ' →'"></div>
+                            </template>
+                          </div>
+                        </template>
+                        <template x-if="chain.data_gaps?.length">
+                          <div style="margin-top:6px;padding:4px 8px;background:rgba(107,114,128,.05);border-radius:4px;font-size:10px;color:var(--text-muted);">
+                            <span style="font-weight:600;">Gaps:</span>
+                            <span x-text="chain.data_gaps.join(' · ')"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                    <template x-if="!loading && (!chain || !chain.nodes?.length)">
+                      <div style="font-size:11px;color:var(--text-muted);">Causal chain not available for this interval — MMSDM unit dispatch data may not yet be backfilled.</div>
                     </template>
                   </div>
                 </div>
@@ -2181,6 +2268,88 @@
               </div><!-- /portfolio-result -->
 
             </div><!-- /portfolio-layout -->
+
+            <!-- ── Procurement Optimizer widget ─────────────────────── -->
+            <div class="section-header" style="margin-top:24px;">Procurement Optimizer
+              <span style="font-size:11px;color:var(--text-muted);font-weight:400;margin-left:8px;">cheapest buying windows — next 24h pre-dispatch signal</span>
+            </div>
+            <div class="card"
+                 x-data="{
+                   windows: null, loading: false, err: null,
+                   async load() {
+                     if (this.loading) return;
+                     this.loading = true; this.err = null;
+                     try {
+                       const r = await api('/api/market/procurement-windows?region=' + encodeURIComponent(selectedRegion));
+                       this.windows = r;
+                     } catch(e) { this.err = e.message; }
+                     this.loading = false;
+                   }
+                 }"
+                 x-init="load()">
+              <div class="card__body">
+                <template x-if="loading && !windows">
+                  <div style="font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:6px;"><span class="spinner"></span> Computing cheapest windows…</div>
+                </template>
+                <template x-if="windows">
+                  <div>
+                    <!-- Current price context -->
+                    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
+                      <div style="font-size:12px;">
+                        <span style="color:var(--text-muted);">Current: </span>
+                        <span style="font-weight:700;font-family:var(--font-mono);" x-text="`$${windows.current_price?.toFixed(0) || '—'}/MWh`"></span>
+                        <span style="color:var(--text-muted);margin-left:4px;" x-text="windows.regime || ''"></span>
+                      </div>
+                      <div style="font-size:12px;" x-show="windows.percentile_rank != null">
+                        <span style="color:var(--text-muted);">30-day rank: </span>
+                        <span :style="`font-weight:600;color:${windows.percentile_rank<30?'#22c55e':windows.percentile_rank>70?'#ef4444':'#f59e0b'}`"
+                              x-text="`P${windows.percentile_rank} — ${windows.percentile_rank<30?'cheap':windows.percentile_rank>70?'expensive':'average'}`"></span>
+                      </div>
+                    </div>
+                    <!-- 24h price bar chart (hourly buckets) -->
+                    <template x-if="windows.hourly_avg?.length">
+                      <div style="margin-bottom:12px;">
+                        <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em;">Hourly average — last 24h · cheapest windows highlighted</div>
+                        <div style="display:flex;height:56px;align-items:flex-end;gap:1px;background:var(--bg-base);border:1px solid var(--border-subtle);border-radius:4px;padding:4px;">
+                          <template x-for="(bucket, i) in windows.hourly_avg" :key="i">
+                            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:1px;">
+                              <div :style="`height:${Math.round(bucket.pct*44)}px;width:100%;border-radius:2px 2px 0 0;background:${bucket.cheapest?'#22c55e':bucket.expensive?'#ef4444':'#2d4a5a'};opacity:${bucket.hour>=6&&bucket.hour<=22?1:0.6}`"
+                                   :title="`${bucket.hour}:00 — $${bucket.avg?.toFixed(0)||'—'}/MWh${bucket.cheapest?' ★ cheap':''}${bucket.expensive?' ⚠ peak':''}`"></div>
+                            </div>
+                          </template>
+                        </div>
+                        <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--text-muted);margin-top:2px;padding:0 2px;">
+                          <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:00</span>
+                        </div>
+                      </div>
+                    </template>
+                    <!-- Cheapest windows list -->
+                    <template x-if="windows.cheapest_windows?.length">
+                      <div>
+                        <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Recommended buying windows</div>
+                        <template x-for="(w, idx) in windows.cheapest_windows.slice(0,3)" :key="idx">
+                          <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;margin-bottom:4px;border-radius:4px;background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.2);">
+                            <div>
+                              <span style="font-size:12px;font-weight:600;font-family:var(--font-mono);" x-text="w.label"></span>
+                              <span style="font-size:10px;color:var(--text-muted);margin-left:6px;" x-text="w.note || ''"></span>
+                            </div>
+                            <span style="font-size:13px;font-weight:700;color:#22c55e;font-family:var(--font-mono);" x-text="`$${w.avg_price?.toFixed(0)||'—'}/MWh`"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                    <!-- Disclaimer -->
+                    <div style="font-size:10px;color:var(--text-muted);margin-top:8px;line-height:1.4;">
+                      Based on 30-day historical averages for this hour of day. Actual prices depend on weather, outages, and market conditions. Not financial advice.
+                    </div>
+                  </div>
+                </template>
+                <template x-if="err">
+                  <div style="font-size:11px;color:var(--verdict-low);" x-text="`Procurement windows unavailable: ${err}`"></div>
+                </template>
+              </div>
+            </div>
+
           </div><!-- /vp-portfolio -->
         </div>
 
@@ -2607,10 +2776,102 @@
                       </div>
                     </template>
 
+                    <!-- ── Enrichment panel ── fuel mix + interconnector + FCAS ── -->
+                    <template x-if="evt.enrichment">
+                      <div style="margin-top:8px;padding:8px;background:var(--bg-base);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);">
+
+                        <!-- Fuel mix bar -->
+                        <template x-if="evt.enrichment.fuel_mix_pct">
+                          <div style="margin-bottom:6px;">
+                            <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;letter-spacing:.05em;text-transform:uppercase;">Dispatch Mix</div>
+                            <div style="display:flex;height:10px;border-radius:3px;overflow:hidden;gap:1px;">
+                              <template x-for="[fuel, pct] in Object.entries(evt.enrichment.fuel_mix_pct)" :key="fuel">
+                                <div :style="`width:${pct}%;background:${{'coal':'#78716c','gas':'#f97316','wind':'#22d3ee','solar':'#facc15','hydro':'#60a5fa','battery':'#a78bfa','biomass':'#84cc16','demand_response':'#f43f5e','unknown':'#6b7280'}[fuel]||'#6b7280'}`"
+                                     :title="`${fuel}: ${pct}%`"></div>
+                              </template>
+                            </div>
+                            <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;">
+                              <template x-for="[fuel, pct] in Object.entries(evt.enrichment.fuel_mix_pct).filter(([,p])=>p>=3)" :key="fuel">
+                                <span style="font-size:10px;color:var(--text-muted);"
+                                      :title="`${fuel}: ${pct}%`"
+                                      x-text="`${fuel} ${pct}%`"></span>
+                              </template>
+                            </div>
+                          </div>
+                        </template>
+
+                        <!-- Interconnector flows -->
+                        <template x-if="evt.enrichment.interconnectors && evt.enrichment.interconnectors.length > 0">
+                          <div style="margin-bottom:6px;">
+                            <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;letter-spacing:.05em;text-transform:uppercase;">Interconnectors</div>
+                            <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                              <template x-for="ic in evt.enrichment.interconnectors" :key="ic.id">
+                                <span style="font-size:10px;font-family:var(--font-mono);padding:1px 5px;border-radius:3px;background:var(--bg-hover);">
+                                  <span x-text="ic.id"></span>
+                                  <span style="margin-left:3px;" x-text="ic.flow_mw != null ? (ic.flow_mw > 0 ? '→' : '←') + ' ' + Math.abs(ic.flow_mw) + ' MW' : '—'"></span>
+                                  <template x-if="ic.cap_pct != null">
+                                    <span :style="`margin-left:2px;color:${ic.cap_pct>85?'var(--verdict-insufficient)':ic.cap_pct>65?'var(--verdict-low)':'var(--text-muted)'}`"
+                                          x-text="`(${ic.cap_pct}%)`"></span>
+                                  </template>
+                                </span>
+                              </template>
+                            </div>
+                          </div>
+                        </template>
+
+                        <!-- FCAS prices -->
+                        <template x-if="evt.enrichment.fcas && (evt.enrichment.fcas.raise_reg != null || evt.enrichment.fcas.raise_fast != null)">
+                          <div>
+                            <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;letter-spacing:.05em;text-transform:uppercase;">FCAS</div>
+                            <div style="display:flex;gap:8px;font-size:10px;font-family:var(--font-mono);">
+                              <template x-if="evt.enrichment.fcas.raise_reg != null">
+                                <span :style="`color:${evt.enrichment.fcas.raise_reg>50?'var(--verdict-insufficient)':evt.enrichment.fcas.raise_reg>20?'var(--verdict-low)':'var(--text-secondary)'}`"
+                                      x-text="`Raise Reg $${evt.enrichment.fcas.raise_reg}/MWh`"></span>
+                              </template>
+                              <template x-if="evt.enrichment.fcas.raise_fast != null">
+                                <span :style="`color:${evt.enrichment.fcas.raise_fast>100?'var(--verdict-insufficient)':evt.enrichment.fcas.raise_fast>30?'var(--verdict-low)':'var(--text-muted)'}`"
+                                      x-text="`Fast $${evt.enrichment.fcas.raise_fast}/MWh`"></span>
+                              </template>
+                            </div>
+                          </div>
+                        </template>
+
+                        <!-- Weather observation -->
+                        <template x-if="evt.enrichment.weather_obs && evt.enrichment.weather_obs.temp_c != null">
+                          <div style="margin-top:6px;">
+                            <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;letter-spacing:.05em;text-transform:uppercase;">Weather at dispatch</div>
+                            <div style="display:flex;flex-wrap:wrap;gap:8px;font-size:10px;font-family:var(--font-mono);">
+                              <span x-text="`${evt.enrichment.weather_obs.temp_c}°C`"
+                                    :style="`color:${evt.enrichment.weather_obs.temp_dev_c>3?'var(--verdict-insufficient)':evt.enrichment.weather_obs.temp_dev_c<-3?'#60a5fa':'var(--text-secondary)'}`"
+                                    :title="`${evt.enrichment.weather_obs.temp_dev_c!=null?(evt.enrichment.weather_obs.temp_dev_c>0?'+':'')+evt.enrichment.weather_obs.temp_dev_c+'°C vs seasonal norm':''}`"></span>
+                              <template x-if="evt.enrichment.weather_obs.temp_dev_c != null">
+                                <span :style="`color:${evt.enrichment.weather_obs.temp_dev_c>3?'var(--verdict-insufficient)':evt.enrichment.weather_obs.temp_dev_c<-3?'#60a5fa':'var(--text-muted)'}`"
+                                      x-text="`(${evt.enrichment.weather_obs.temp_dev_c>0?'+':''}${evt.enrichment.weather_obs.temp_dev_c}°C norm)`"></span>
+                              </template>
+                              <template x-if="evt.enrichment.weather_obs.wind_kmh != null">
+                                <span style="color:var(--text-muted);" x-text="`Wind ${evt.enrichment.weather_obs.wind_kmh} km/h`"></span>
+                              </template>
+                              <template x-if="evt.enrichment.weather_obs.cloud_pct != null">
+                                <span style="color:var(--text-muted);" x-text="`Cloud ${evt.enrichment.weather_obs.cloud_pct}%`"></span>
+                              </template>
+                              <span style="color:var(--text-muted);font-size:9px;" x-text="`obs ${evt.enrichment.weather_obs.obs_age_min}min offset`"></span>
+                            </div>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+
                     <!-- Missing / unknown -->
                     <template x-if="evt.missing_data && evt.missing_data.length > 0">
                       <div style="margin-top:6px;font-size:11px;color:var(--text-muted);">
-                        Not explained: <span x-text="evt.missing_data.join(' · ')"></span>
+                        Gaps: <span x-text="evt.missing_data.map(k => ({
+                          aemo_market_notice: 'No AEMO notice found',
+                          notices_cache_stale: 'Notices cache stale',
+                          weather_obs: 'Weather obs unavailable',
+                          bom_forecast: 'BOM forecast unavailable',
+                          fcas_data: 'FCAS data unavailable',
+                          interconnector: 'Interconnector data unavailable',
+                        }[k] || k)).join(' · ')"></span>
                       </div>
                     </template>
 
