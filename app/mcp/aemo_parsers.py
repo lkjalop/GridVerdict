@@ -770,3 +770,100 @@ def _normalise_fuel_type(value: str | None) -> str | None:
 def _parse_archive_dt(value: str) -> datetime:
     from app.data.aemo_live_client import _parse_aemo_dt
     return _parse_aemo_dt(value.strip().replace('"', ""))
+
+
+# ── Rooftop solar parsers ─────────────────────────────────────────────
+
+_ROOFTOP_ACTUAL_COLS = {"INTERVAL_DATETIME", "REGIONID", "POWER"}
+_ROOFTOP_FORECAST_COLS = {"INTERVAL_DATETIME", "REGIONID", "POWERMEAN"}
+
+
+def parse_mmsdm_rooftop_content(content: bytes, raw_ref: str = "mmsdm") -> list[dict]:
+    """Parse MMSDM ROOFTOP_PV_ACTUAL_SCADA and ROOFTOP_PV_FORECAST_SCADA content.
+
+    Returns list of dicts with keys: region, interval_datetime, actual_mw,
+    forecast_mw, delta_mw. Both table types are merged by (region, interval_datetime)
+    so partial files (actual-only or forecast-only) are handled gracefully.
+    """
+    actuals: dict[tuple, float] = {}
+    forecasts: dict[tuple, float] = {}
+
+    for _name, text in _extract_archive_texts(content):
+        upper = text[:2000].upper()
+        if "ROOFTOP_PV_ACTUAL" in upper or ("POWER" in upper and "REGIONID" in upper and "INTERVAL_DATETIME" in upper):
+            _parse_rooftop_actual_text(text, actuals)
+        elif "ROOFTOP_PV_FORECAST" in upper or ("POWERMEAN" in upper and "REGIONID" in upper):
+            _parse_rooftop_forecast_text(text, forecasts)
+
+    # Merge: union of all (region, interval_datetime) keys
+    all_keys = set(actuals) | set(forecasts)
+    rows = []
+    for key in sorted(all_keys):
+        region, interval_dt = key
+        actual = actuals.get(key)
+        forecast = forecasts.get(key)
+        delta = round(actual - forecast, 2) if actual is not None and forecast is not None else None
+        rows.append({
+            "region": region,
+            "interval_datetime": interval_dt,
+            "actual_mw": actual,
+            "forecast_mw": forecast,
+            "delta_mw": delta,
+        })
+    return rows
+
+
+def _parse_rooftop_actual_text(text: str, out: dict) -> None:
+    """Extract (region, interval_datetime) → actual_mw from ROOFTOP_PV_ACTUAL_SCADA CSV."""
+    reader = csv.reader(io.StringIO(text))
+    header: list[str] | None = None
+    for row in reader:
+        if not row:
+            continue
+        tag = row[0].strip().upper()
+        if tag == "C":
+            break
+        if tag == "I":
+            header = [c.strip().upper() for c in row]
+            continue
+        if tag != "D" or header is None:
+            continue
+        try:
+            rd = dict(zip(header, row))
+            region = rd.get("REGIONID", "").strip().upper()
+            dt_str = rd.get("INTERVAL_DATETIME", "").strip()
+            power_str = rd.get("POWER", "").strip()
+            if not region or not dt_str or not power_str:
+                continue
+            dt = _parse_archive_dt(dt_str)
+            out[(region, dt)] = round(float(power_str), 2)
+        except Exception:
+            continue
+
+
+def _parse_rooftop_forecast_text(text: str, out: dict) -> None:
+    """Extract (region, interval_datetime) → forecast_mw from ROOFTOP_PV_FORECAST_SCADA CSV."""
+    reader = csv.reader(io.StringIO(text))
+    header: list[str] | None = None
+    for row in reader:
+        if not row:
+            continue
+        tag = row[0].strip().upper()
+        if tag == "C":
+            break
+        if tag == "I":
+            header = [c.strip().upper() for c in row]
+            continue
+        if tag != "D" or header is None:
+            continue
+        try:
+            rd = dict(zip(header, row))
+            region = rd.get("REGIONID", "").strip().upper()
+            dt_str = rd.get("INTERVAL_DATETIME", "").strip()
+            power_str = rd.get("POWERMEAN", "").strip()
+            if not region or not dt_str or not power_str:
+                continue
+            dt = _parse_archive_dt(dt_str)
+            out[(region, dt)] = round(float(power_str), 2)
+        except Exception:
+            continue

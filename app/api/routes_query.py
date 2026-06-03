@@ -73,6 +73,310 @@ def _progress(session_id: str, step: str, message: str, t0: float) -> None:
     })
 
 
+class _EnrichBundle:
+    """Holds all post-gather enrichment results from _enrich_context()."""
+    __slots__ = (
+        "temporal_evidence", "fuel_mix", "opennem_trend", "opennem_diurnal",
+        "hist_dist", "period_stats", "intraday_prices",
+    )
+    def __init__(self, temporal_evidence, fuel_mix, opennem_trend, opennem_diurnal,
+                 hist_dist, period_stats, intraday_prices):
+        self.temporal_evidence = temporal_evidence
+        self.fuel_mix = fuel_mix
+        self.opennem_trend = opennem_trend
+        self.opennem_diurnal = opennem_diurnal
+        self.hist_dist = hist_dist
+        self.period_stats = period_stats
+        self.intraday_prices = intraday_prices
+
+
+async def _enrich_context(
+    gather: "GatherResult",
+    decomp: "Any",
+    region: str,
+    db: "AsyncSession",
+    session_id: str,
+    t0: float,
+    events: "list[dict]",    # mutated in-place
+    sg_sources: "list[str]", # mutated in-place
+    query_time: "datetime",
+) -> "_EnrichBundle":
+    """Run all post-gather enrichment in sequence: TemporalRAG, fuel mix, BOM 7-day,
+    OpenNEM, historical price distribution, period stats, and intraday prices.
+    Appends timeline events and source labels to events/sg_sources in-place."""
+    from typing import Any as _Any
+
+    # TemporalRAG — bitemporal evidence retrieval
+    temporal_evidence: list[dict] = []
+    try:
+        from app.engines.temporalrag import TemporalQuery, retrieve as _trag_retrieve
+        _anchor = gather.dispatch.valid_time if gather.dispatch else query_time
+        _trag_query = TemporalQuery(
+            valid_time_from=_anchor - timedelta(hours=4),
+            valid_time_to=_anchor,
+            system_time_at_query=query_time,
+            region=region,
+            max_docs=12,
+        )
+        async with db.begin_nested():
+            _bundle = await _trag_retrieve(_trag_query, session=db)
+        temporal_evidence = [
+            {
+                "doc_id": d.doc_id,
+                "source_type": d.source_type,
+                "valid_time": d.valid_time.isoformat(),
+                "system_time": d.system_time.isoformat(),
+                "known_before_query_time": d.system_time <= query_time,
+                "relevance_score": round(d.relevance_score, 4),
+                "retrieval_reason": _trag_retrieval_reason(d),
+                "citation": d.citation,
+                "content": {k: v for k, v in d.content.items()
+                            if k in ("price_rrp", "demand_mw", "regime", "notice_type",
+                                     "reason", "title", "region", "query_text", "verdict")},
+            }
+            for d in _bundle.docs
+        ]
+    except Exception as exc:
+        logger.debug("TemporalRAG retrieval failed (non-fatal): %s", exc)
+
+    # Fuel mix — per-fuel-type breakdown for source recommendation
+    fuel_mix: dict | None = None
+    try:
+        from app.engines.fuel_mix import get_fuel_mix
+        async with db.begin_nested():
+            fuel_mix = await get_fuel_mix(
+                region, db,
+                weather=gather.weather,
+                unit_events=gather.unit_events or None,
+            )
+    except Exception as exc:
+        logger.debug("Fuel mix retrieval failed (non-fatal): %s", exc)
+
+    # BOM 7-day forecast — injected when query requires forward weather scenario
+    if decomp.requires_forecast and gather.weather is None:
+        try:
+            from app.mcp.bom_forecast_client import fetch_7day_forecast, forecast_to_scatter_context
+            _bom = await fetch_7day_forecast(region)
+            if _bom is not None:
+                _bom_dict = forecast_to_scatter_context(_bom)
+                from dataclasses import replace as _dc_replace
+                gather = _dc_replace(gather, weather=_bom_dict)
+                sg_sources.append("BOM_7DAY_FORECAST")
+                events.append({
+                    "step": "BOM_7DAY_FORECAST",
+                    "t_ms": round((time.perf_counter() - t0) * 1000),
+                    "region": region,
+                    "days": len(_bom.days),
+                    "heatwave_days": len(_bom.days_with_heatwave()),
+                })
+        except Exception as _bom_err:
+            logger.debug("BOM 7-day forecast inject failed (non-fatal): %s", _bom_err)
+
+    # OpenNEM trend/diurnal — real monthly + hourly data from OpenElectricity API
+    opennem_trend: _Any | None = None
+    opennem_diurnal: _Any | None = None
+    _wants_opennem = decomp.requested_output in ("trend_analysis", "diurnal_analysis")
+    if _wants_opennem:
+        try:
+            _progress(session_id, "opennem", "OpenNEM: fetching real market data...", t0)
+            from app.mcp.opennem_client import get_trend_context, get_diurnal_context
+            import asyncio as _asyncio
+            if decomp.requested_output == "trend_analysis":
+                opennem_trend = await _asyncio.wait_for(get_trend_context(region), timeout=8.0)
+                sg_sources.append("OPENNEM_TREND")
+            else:
+                opennem_diurnal = await _asyncio.wait_for(get_diurnal_context(region), timeout=8.0)
+                sg_sources.append("OPENNEM_DIURNAL")
+        except Exception as _onem_err:
+            logger.debug("OpenNEM fetch failed (non-fatal): %s", _onem_err)
+
+    # Historical price distribution — for "is this cheap vs last year?" queries
+    hist_dist: dict | None = None
+    _wants_hist = (
+        any(sq.get("type") == "historical_price_distribution" for sq in (decomp.sub_questions or []))
+        or decomp.requires_history
+        or decomp.intent.value in ("lookup", "explanation", "comparison", "action_recommendation")
+    )
+    if _wants_hist:
+        try:
+            async with db.begin_nested():
+                from app.engines.historical_price import get_historical_price_distribution
+                _anchor = gather.dispatch.valid_time if gather.dispatch else datetime.now(timezone.utc)
+                _hist_period = next(
+                    (sq.get("period", "last_year") for sq in (decomp.sub_questions or [])
+                     if sq.get("type") == "historical_price_distribution"),
+                    "last_year",
+                )
+                hist_dist = await get_historical_price_distribution(
+                    db, region, _anchor, period=_hist_period,
+                )
+        except Exception as exc:
+            logger.debug("Historical price distribution unavailable (non-fatal): %s", exc)
+
+    # Specific period stats — direct aggregate for "what was the average in July 2023?"
+    period_stats: dict | None = None
+    _period_sq = next(
+        (sq for sq in (decomp.sub_questions or []) if sq.get("type") == "specific_period_stats"),
+        None,
+    )
+    if _period_sq:
+        try:
+            from app.engines.historical_price import get_period_stats
+            period_stats = await get_period_stats(db, region, _period_sq["start"], _period_sq["end"])
+        except Exception as exc:
+            logger.debug("Period stats unavailable (non-fatal): %s", exc)
+
+    # Intraday price history — for "earlier today wind was $15, why pay double now?"
+    intraday_prices: list[dict] = []
+    _has_intraday_sq = any(
+        sq.get("type") == "intraday_price_cycle" for sq in (decomp.sub_questions or [])
+    )
+    if _has_intraday_sq:
+        try:
+            from app.db.session import db_session as _iday_session_factory
+            from sqlalchemy import text as _text
+            _now = datetime.now(timezone.utc)
+            _today_start = _now.replace(hour=0, minute=0, second=0, microsecond=0)
+            _cutoff = _now - timedelta(hours=1)
+            async with _iday_session_factory() as _iday_session:
+                _iday_result = await _iday_session.execute(_text("""
+                    SELECT valid_time, price_rrp
+                    FROM market_events
+                    WHERE source = 'AEMO_DISPATCH_PRICE'
+                      AND region = :region
+                      AND price_rrp IS NOT NULL
+                      AND valid_time >= :today_start
+                      AND valid_time <= :cutoff
+                    ORDER BY valid_time ASC
+                    LIMIT 288
+                """), {"region": region, "today_start": _today_start, "cutoff": _cutoff})
+                _rows = _iday_result.fetchall()
+            if _rows:
+                for row in _rows:
+                    _vt = row[0]
+                    _vt_str = str(_vt)
+                    try:
+                        _hour = _vt.hour if hasattr(_vt, "hour") else int(_vt_str[11:13])
+                    except Exception:
+                        _hour = 0
+                    intraday_prices.append({"time": _vt_str, "price": float(row[1]), "hour": _hour})
+            events.append({
+                "step": "INTRADAY_PRICES",
+                "t_ms": round((time.perf_counter() - t0) * 1000),
+                "region": region,
+                "rows": len(intraday_prices),
+            })
+        except Exception as _iday_err:
+            logger.debug("Intraday price fetch failed (non-fatal): %s", _iday_err)
+
+    # Summarise fuel dispatch + deepen progress
+    _fuel_by_type: dict[str, float] = {}
+    if gather.unit_events:
+        for ue in gather.unit_events:
+            fuel = getattr(ue, "fuel_type", None) or "unknown"
+            mw = float(getattr(ue, "total_cleared_mw", 0) or 0)
+            _fuel_by_type[fuel] = round(_fuel_by_type.get(fuel, 0) + mw, 1)
+    _binding_constraints = sum(
+        1 for d in gather.driver_events if getattr(d, "constraint_id", None)
+    ) if gather.driver_events else 0
+    _deepen_parts = []
+    if temporal_evidence: _deepen_parts.append(f"TemporalRAG {len(temporal_evidence)} docs")
+    if fuel_mix: _deepen_parts.append("fuel mix")
+    if hist_dist and hist_dist.get("available"): _deepen_parts.append("historical archive")
+    if gather.weather: _deepen_parts.append("weather")
+    _progress(session_id, "deepen",
+              f"Deepening: {' · '.join(_deepen_parts) or 'evidence assembled'}...", t0)
+    _progress(session_id, "plan", "Building evidence-grounded answer...", t0)
+
+    _ev = {
+        "step": "EVIDENCE_ASSEMBLED",
+        "t_ms": round((time.perf_counter() - t0) * 1000),
+        "temporal_docs": len(temporal_evidence),
+        "fuel_sources": len((fuel_mix or {}).get("sources", [])),
+        "fuel_dispatch_mw": _fuel_by_type or None,
+        "binding_constraints": _binding_constraints or None,
+        "analogs_matched": len(gather.analogs) if gather.analogs else 0,
+        "driver_events": len(gather.driver_events) if gather.driver_events else 0,
+    }
+    if hist_dist and hist_dist.get("available"):
+        _ev["hist_dist"] = {
+            "period": hist_dist.get("period_label"),
+            "median": round(hist_dist.get("median", 0), 2),
+            "n_rows": hist_dist.get("count"),
+        }
+    events.append(_ev)
+
+    return _EnrichBundle(
+        temporal_evidence=temporal_evidence,
+        fuel_mix=fuel_mix,
+        opennem_trend=opennem_trend,
+        opennem_diurnal=opennem_diurnal,
+        hist_dist=hist_dist,
+        period_stats=period_stats,
+        intraday_prices=intraday_prices,
+    )
+
+
+async def _check_tool_outputs(
+    gather: "GatherResult",
+    observer: "Any",
+    user: "Any",
+    db: "AsyncSession",
+    query_id: str,
+    trace_id: str,
+) -> "list[dict]":
+    """Build tool output manifest and run security gate 3.
+    Returns the manifest (used later as tool_calls_log).
+    Raises HTTPException(502) if the observer halts on anomalous data."""
+    tool_outputs: list[dict] = []
+    if gather.dispatch:
+        tool_outputs.append({
+            "source": "AEMO_DISPATCH_PRICE",
+            "price_rrp": gather.dispatch.price_rrp,
+            "demand_mw": gather.dispatch.demand_mw,
+            "availability_mw": gather.dispatch.availability_mw,
+        })
+    for notice in gather.notices:
+        tool_outputs.append({"source": "AEMO_NOTICE", **notice})
+    for item in gather.news_items:
+        tool_outputs.append({
+            "source": "NEM_NEWS_RSS",
+            "title": item.get("title", ""),
+            "description": item.get("summary", ""),
+            "link": item.get("link", ""),
+        })
+    if gather.weather:
+        consensus = gather.weather.get("consensus", {})
+        tool_outputs.append({
+            "source": "WEATHER_CONSENSUS",
+            "temperature_c": consensus.get("temperature_c"),
+            "wind_speed_kmh": consensus.get("wind_speed_kmh"),
+            "precipitation_mm": consensus.get("precipitation_mm"),
+            "confidence": gather.weather.get("confidence"),
+            "raw_ref": gather.weather.get("raw_ref", ""),
+        })
+    for driver in gather.driver_events:
+        tool_outputs.append({"source": driver.get("source", "AEMO_MARKET_DRIVER"), **driver})
+    for unit in gather.unit_events:
+        tool_outputs.append({"source": unit.get("source", "AEMO_UNIT_DISPATCH"), **unit})
+
+    tool_check = observer.pass_tool_output(tool_outputs)
+    append_observer_result(tool_check, "tool_output")
+    try:
+        await log_observer_event(db, tool_check, user.tenant_id, query_id, trace_id)
+    except Exception as _oe:
+        logger.debug("Observer event log failed (non-fatal): %s", _oe)
+    if tool_check.should_halt():
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                f"Tool output failed security validation: "
+                f"{tool_check.signals[0].description if tool_check.signals else 'anomalous data'}"
+            ),
+        )
+    return tool_outputs
+
+
 class QueryRequest(BaseModel):
     text: str
     region: str = "NSW1"
@@ -673,275 +977,21 @@ async def submit_query(
         except Exception as exc:
             logger.debug("Analog driver re-rank unavailable (non-fatal): %s", exc)
 
-    # --- 2b. TemporalRAG — bitemporal evidence retrieval ---
-    temporal_evidence: list[dict] = []
+    # --- Phases 2b–2e: Enrichment (TemporalRAG, fuel mix, BOM, OpenNEM, hist, intraday) ---
     _query_time = datetime.now(timezone.utc)
-    try:
-        from datetime import timedelta
-        from app.engines.temporalrag import TemporalQuery, retrieve as _trag_retrieve
-
-        _anchor = gather.dispatch.valid_time if gather.dispatch else _query_time
-        _trag_query = TemporalQuery(
-            valid_time_from=_anchor - timedelta(hours=4),
-            valid_time_to=_anchor,
-            system_time_at_query=_query_time,
-            region=region,
-            max_docs=12,
-        )
-        async with db.begin_nested():
-            _bundle = await _trag_retrieve(_trag_query, session=db)
-        temporal_evidence = [
-            {
-                "doc_id": d.doc_id,
-                "source_type": d.source_type,
-                "valid_time": d.valid_time.isoformat(),
-                "system_time": d.system_time.isoformat(),
-                "known_before_query_time": d.system_time <= _query_time,
-                "relevance_score": round(d.relevance_score, 4),
-                "retrieval_reason": _trag_retrieval_reason(d),
-                "citation": d.citation,
-                "content": {k: v for k, v in d.content.items()
-                            if k in ("price_rrp", "demand_mw", "regime", "notice_type",
-                                     "reason", "title", "region", "query_text", "verdict")},
-            }
-            for d in _bundle.docs
-        ]
-    except Exception as exc:
-        logger.debug("TemporalRAG retrieval failed (non-fatal): %s", exc)
-
-    # --- 2c. Fuel mix — per-fuel-type breakdown for source recommendation ---
-    fuel_mix: dict | None = None
-    try:
-        from app.engines.fuel_mix import get_fuel_mix
-        # Pass T9 scatter unit_events so fuel_mix uses live dispatch data (tier 0)
-        # instead of re-querying the DB (tier 1). Only saves a round-trip but also
-        # ensures the fuel recommendation uses the same interval as the answer.
-        async with db.begin_nested():
-            fuel_mix = await get_fuel_mix(
-                region, db,
-                weather=gather.weather,
-                unit_events=gather.unit_events or None,
-            )
-    except Exception as exc:
-        logger.debug("Fuel mix retrieval failed (non-fatal): %s", exc)
-
-    # --- 2c5. BOM 7-day forecast — injected when query requires forward weather scenario ---
-    # Runs after scatter-gather; does NOT block the primary verdict path.
-    # Result is stored in gather.weather supplemental field when available.
-    if decomp.requires_forecast and gather.weather is None:
-        try:
-            from app.mcp.bom_forecast_client import fetch_7day_forecast, forecast_to_scatter_context
-            _bom = await fetch_7day_forecast(region)
-            if _bom is not None:
-                _bom_dict = forecast_to_scatter_context(_bom)
-                # Inject into gather as 7day_forecast supplemental (non-destructive)
-                from dataclasses import replace as _dc_replace
-                gather = _dc_replace(gather, weather=_bom_dict)
-                _sg_sources.append("BOM_7DAY_FORECAST")
-                _events.append({
-                    "step": "BOM_7DAY_FORECAST",
-                    "t_ms": round((time.perf_counter() - _t0) * 1000),
-                    "region": region,
-                    "days": len(_bom.days),
-                    "heatwave_days": len(_bom.days_with_heatwave()),
-                })
-        except Exception as _bom_err:
-            logger.debug("BOM 7-day forecast inject failed (non-fatal): %s", _bom_err)
-
-    # --- 2c6. OpenNEM trend/diurnal data — real monthly + hourly data from OpenElectricity API ---
-    opennem_trend: "Any | None" = None   # TrendContext
-    opennem_diurnal: "Any | None" = None  # DiurnalContext
-    _wants_opennem = decomp.requested_output in ("trend_analysis", "diurnal_analysis")
-    if _wants_opennem:
-        try:
-            _progress(session_id, "opennem", "OpenNEM: fetching real market data…", _t0)
-            from app.mcp.opennem_client import get_trend_context, get_diurnal_context
-            import asyncio as _asyncio
-            if decomp.requested_output == "trend_analysis":
-                opennem_trend = await _asyncio.wait_for(get_trend_context(region), timeout=8.0)
-                _sg_sources.append("OPENNEM_TREND")
-            else:
-                opennem_diurnal = await _asyncio.wait_for(get_diurnal_context(region), timeout=8.0)
-                _sg_sources.append("OPENNEM_DIURNAL")
-        except Exception as _onem_err:
-            logger.debug("OpenNEM fetch failed (non-fatal): %s", _onem_err)
-
-    # --- 2d. Historical price distribution — for "is this cheap vs last year?" queries ---
-    hist_dist: dict | None = None
-    _has_hist_sq = any(
-        sq.get("type") == "historical_price_distribution"
-        for sq in (decomp.sub_questions or [])
+    _enrich = await _enrich_context(
+        gather, decomp, region, db, session_id, _t0, _events, _sg_sources, _query_time,
     )
-    # Run historical distribution for any live-market query (not just explicit historical questions)
-    # so the answer can always say "this is cheap/normal/elevated vs last year"
-    _wants_hist = (
-        _has_hist_sq
-        or decomp.requires_history
-        or decomp.intent.value in ("lookup", "explanation", "comparison", "action_recommendation")
-    )
-    if _wants_hist:
-        try:
-            async with db.begin_nested():
-                from app.engines.historical_price import get_historical_price_distribution
-                _anchor = gather.dispatch.valid_time if gather.dispatch else datetime.now(timezone.utc)
-                _hist_period = next(
-                    (sq.get("period", "last_year") for sq in (decomp.sub_questions or [])
-                     if sq.get("type") == "historical_price_distribution"),
-                    "last_year",
-                )
-                hist_dist = await get_historical_price_distribution(
-                    db, region, _anchor, period=_hist_period,
-                )
-        except Exception as exc:
-            logger.debug("Historical price distribution unavailable (non-fatal): %s", exc)
+    temporal_evidence = _enrich.temporal_evidence
+    fuel_mix          = _enrich.fuel_mix
+    opennem_trend     = _enrich.opennem_trend
+    opennem_diurnal   = _enrich.opennem_diurnal
+    hist_dist         = _enrich.hist_dist
+    period_stats      = _enrich.period_stats
+    intraday_prices   = _enrich.intraday_prices
 
-    # --- 2d-ii. Specific period stats — direct aggregate for "what was the average in July 2023?" ---
-    period_stats: dict | None = None
-    _period_sq = next(
-        (sq for sq in (decomp.sub_questions or []) if sq.get("type") == "specific_period_stats"),
-        None,
-    )
-    if _period_sq:
-        try:
-            from app.engines.historical_price import get_period_stats
-            period_stats = await get_period_stats(
-                db, region, _period_sq["start"], _period_sq["end"]
-            )
-        except Exception as exc:
-            logger.debug("Period stats unavailable (non-fatal): %s", exc)
-
-    # --- 2e. Intraday price history — for "earlier today wind was $15, why pay double now?" ---
-    intraday_prices: list[dict] = []
-    _has_intraday_sq = any(
-        sq.get("type") == "intraday_price_cycle"
-        for sq in (decomp.sub_questions or [])
-    )
-    if _has_intraday_sq:
-        # Use a separate session so any DB error doesn't corrupt the main request session
-        try:
-            from app.db.session import db_session as _iday_session_factory
-            from sqlalchemy import text as _text
-            _now = datetime.now(timezone.utc)
-            _today_start = _now.replace(hour=0, minute=0, second=0, microsecond=0)
-            _cutoff = _now - timedelta(hours=1)
-            async with _iday_session_factory() as _iday_session:
-                _iday_result = await _iday_session.execute(_text("""
-                    SELECT valid_time, price_rrp
-                    FROM market_events
-                    WHERE source = 'AEMO_DISPATCH_PRICE'
-                      AND region = :region
-                      AND price_rrp IS NOT NULL
-                      AND valid_time >= :today_start
-                      AND valid_time <= :cutoff
-                    ORDER BY valid_time ASC
-                    LIMIT 288
-                """), {"region": region, "today_start": _today_start, "cutoff": _cutoff})
-                _rows = _iday_result.fetchall()
-            if _rows:
-                intraday_prices = []
-                for row in _rows:
-                    _vt = row[0]
-                    _vt_str = str(_vt)
-                    try:
-                        _hour = _vt.hour if hasattr(_vt, "hour") else int(_vt_str[11:13])
-                    except Exception:
-                        _hour = 0
-                    intraday_prices.append({
-                        "time": _vt_str,
-                        "price": float(row[1]),
-                        "hour": _hour,
-                    })
-            _events.append({
-                "step": "INTRADAY_PRICES",
-                "t_ms": round((time.perf_counter() - _t0) * 1000),
-                "region": region,
-                "rows": len(intraday_prices),
-            })
-        except Exception as _iday_err:
-            logger.debug("Intraday price fetch failed (non-fatal): %s", _iday_err)
-
-    # Summarise fuel dispatch by type for the evidence event
-    _fuel_by_type: dict[str, float] = {}
-    if gather.unit_events:
-        for ue in gather.unit_events:
-            fuel = getattr(ue, "fuel_type", None) or "unknown"
-            mw = float(getattr(ue, "total_cleared_mw", 0) or 0)
-            _fuel_by_type[fuel] = round(_fuel_by_type.get(fuel, 0) + mw, 1)
-    _binding_constraints = sum(
-        1 for d in gather.driver_events
-        if getattr(d, "constraint_id", None)
-    ) if gather.driver_events else 0
-    _deepen_parts = []
-    if temporal_evidence: _deepen_parts.append(f"TemporalRAG {len(temporal_evidence)} docs")
-    if fuel_mix: _deepen_parts.append("fuel mix")
-    if hist_dist and hist_dist.get("available"): _deepen_parts.append("3yr history")
-    if gather.weather: _deepen_parts.append("weather")
-    _progress(session_id, "deepen",
-              f"Deepening: {' · '.join(_deepen_parts) or 'evidence assembled'}…", _t0)
-    _progress(session_id, "plan", "Building evidence-grounded answer…", _t0)
-
-    _ev_assembled: dict = {
-        "step": "EVIDENCE_ASSEMBLED",
-        "t_ms": round((time.perf_counter() - _t0) * 1000),
-        "temporal_docs": len(temporal_evidence),
-        "fuel_sources": len((fuel_mix or {}).get("sources", [])),
-        "fuel_dispatch_mw": _fuel_by_type or None,
-        "binding_constraints": _binding_constraints or None,
-        "analogs_matched": len(gather.analogs) if gather.analogs else 0,
-        "driver_events": len(gather.driver_events) if gather.driver_events else 0,
-    }
-    if hist_dist and hist_dist.get("available"):
-        _ev_assembled["hist_dist"] = {
-            "period": hist_dist.get("period_label"),
-            "median": round(hist_dist.get("median", 0), 2),
-            "n_rows": hist_dist.get("count"),
-        }
-    _events.append(_ev_assembled)
-
-    # --- 2e. Security pass 3 — tool output hygiene ---
-    tool_outputs = []
-    if gather.dispatch:
-        tool_outputs.append({
-            "source": "AEMO_DISPATCH_PRICE",
-            "price_rrp": gather.dispatch.price_rrp,
-            "demand_mw": gather.dispatch.demand_mw,
-            "availability_mw": gather.dispatch.availability_mw,
-        })
-    for notice in gather.notices:
-        tool_outputs.append({"source": "AEMO_NOTICE", **notice})
-    for item in gather.news_items:
-        tool_outputs.append({
-            "source": "NEM_NEWS_RSS",
-            "title": item.get("title", ""),
-            "description": item.get("summary", ""),
-            "link": item.get("link", ""),
-        })
-    if gather.weather:
-        consensus = gather.weather.get("consensus", {})
-        tool_outputs.append({
-            "source": "WEATHER_CONSENSUS",
-            "temperature_c": consensus.get("temperature_c"),
-            "wind_speed_kmh": consensus.get("wind_speed_kmh"),
-            "precipitation_mm": consensus.get("precipitation_mm"),
-            "confidence": gather.weather.get("confidence"),
-            "raw_ref": gather.weather.get("raw_ref", ""),
-        })
-    for driver in gather.driver_events:
-        tool_outputs.append({"source": driver.get("source", "AEMO_MARKET_DRIVER"), **driver})
-    for unit in gather.unit_events:
-        tool_outputs.append({"source": unit.get("source", "AEMO_UNIT_DISPATCH"), **unit})
-
-    tool_check = observer.pass_tool_output(tool_outputs)
-    append_observer_result(tool_check, "tool_output")
-    try:
-        await log_observer_event(db, tool_check, user.tenant_id, query_id, trace_id)
-    except Exception as _oe:
-        logger.debug("Observer event log failed (non-fatal): %s", _oe)
-    if tool_check.should_halt():
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Tool output failed security validation: {tool_check.signals[0].description if tool_check.signals else 'anomalous data'}",
-        )
+    # --- Security gate 3: tool output hygiene ---
+    tool_outputs = await _check_tool_outputs(gather, observer, user, db, query_id, trace_id)
 
     # --- 3. Assemble why sources + build narrative ---
     why_sources = assemble_why_sources(decomp, gather, region)

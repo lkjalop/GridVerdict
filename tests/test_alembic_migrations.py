@@ -25,7 +25,7 @@ import pytest
 _MIGRATIONS_DIR = (
     Path(__file__).parent.parent / "app" / "db" / "migrations" / "versions"
 )
-_EXPECTED_HEAD = "0005"
+_EXPECTED_HEAD = "0006"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

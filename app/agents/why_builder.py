@@ -165,7 +165,6 @@ def build_why(sources: WhySources) -> WhyOutput:
             "This is contextual only and is not treated as a confirmed price driver."
         )
 
-    # Sprint Q: include pre-computed commentary events as verified historical context
     if news.auto_commentary:
         for ac in news.auto_commentary[:3]:
             ac_headline = ac.get("headline", "")
@@ -242,7 +241,6 @@ def build_why(sources: WhySources) -> WhyOutput:
         top = drivers.tight_interconnectors[0]
         values = top.get("values", {})
         flow = values.get("mw_flow", values.get("metered_mw_flow"))
-        # Sprint C: use richer narrative when interconnector causality engine has run
         if drivers.interconnector_narrative:
             parts.append(drivers.interconnector_narrative)
         else:
@@ -309,7 +307,7 @@ def build_why(sources: WhySources) -> WhyOutput:
     else:
         missing_data.append("unit_dispatch_events")
 
-    # ── Marginal price-setter identification (Sprint T) ───────────────
+    # ── Marginal price-setter identification ─────────────────────────
     # Runs whenever we have unit dispatch data OR need a causal explanation.
     # Upgrades fuel attribution from prior cost model to dispatch-backed evidence.
     _marginal_setter = None
@@ -440,10 +438,8 @@ def build_why(sources: WhySources) -> WhyOutput:
     n_watch = _build_next_watch(c, forecast, drivers, analogs, sources.weather, sources.news)
     answer_sections = _build_answer_sections(sources, evidence_refs, missing_data, why_text)
 
-    # Sprint U: upgrade_path — what data would improve this verdict and by how much
     upgrade_path = _compute_upgrade_path(sources, missing_data, analogs, technology, forecast)
 
-    # Sprint U: causal chain — ordered evidence steps for EXPLANATION intent
     causal_chain = _build_causal_chain_steps(sources, decomp.intent, missing_data)
 
     return WhyOutput(
@@ -515,7 +511,7 @@ def _build_driver_tiers(c, news, weather, drivers, technology, analogs, forecast
         note=f"{len(drivers.binding_constraints)} binding" if drivers.binding_constraints else "not ingested",
     ))
 
-    # 5. Interconnector flows — Sprint C: tier elevated to CONFIRMED when causal role is causal
+    # 5. Interconnector flows — tier elevated to CONFIRMED when causal role is proven
     _ic_role = drivers.interconnector_causal_role
     _ic_tier = (
         T.CONFIRMED if _ic_role == "causal"
@@ -589,7 +585,7 @@ def _build_claim_tiers(
     Each entry: {label, tier, present, evidence_ref_ids: list[str]}
 
     Invariant: if tier is 'confirmed' or 'supported', evidence_ref_ids is non-empty.
-    Sprint R: tiers are capped at 'plausible' when all matched refs are stale (>15min).
+    Tiers are capped at 'plausible' when all matched refs are stale (>15min).
     """
     _SOURCE_MAP: dict[str, list[str]] = {
         "dispatch_price":        ["AEMO_DISPATCH_PRICE"],
@@ -633,7 +629,7 @@ def _build_claim_map(
     """Convert claim_tiers into typed ClaimMapItem objects and add Sprint R claim types.
 
     Base claims are built from the existing driver tier labels.
-    Sprint R adds: CONSTRAINT_BINDING, WEATHER_CORRELATION, REBID_EVIDENCE,
+    Extended claim types from WhySources: CONSTRAINT_BINDING, WEATHER_CORRELATION, REBID_EVIDENCE,
     OUTAGE_EVIDENCE, FCAS_CLAIM sourced directly from WhySources fields.
 
     Quality invariants enforced here:
@@ -705,7 +701,6 @@ def _build_claim_map(
             note=stale_note,
         ))
 
-    # ── Sprint R: extended claim types from WhySources ────────────────────────
     if sources is None:
         return result
 
@@ -916,7 +911,6 @@ def _build_next_watch(
             f"Watch {tag_str} — weather is a current market driver; "
             f"forecast changes will affect demand and renewable output."
         )
-        # Sprint R: specific thresholds trigger stronger watch items
         wc = getattr(weather, "consensus", {}) or {}
         temp = wc.get("temperature_c")
         wind_kmh = wc.get("wind_speed_kmh")
@@ -933,7 +927,6 @@ def _build_next_watch(
                 f"({float(wind_kmh):.1f} km/h) will reduce wind farm output materially."
             )
 
-    # ── Sprint R: FCAS watch ─────────────────────────────────────────
     driver_events = getattr(drivers, "events", [])
     fcas_events = [
         e for e in driver_events
@@ -947,7 +940,6 @@ def _build_next_watch(
                 f"constraint; system inertia may be insufficient to absorb the next outage."
             )
 
-    # ── Sprint R: Rebid watch ────────────────────────────────────────
     rebid_events = [
         e for e in driver_events
         if "REBID" in str(e.get("source", "")).upper() or "REBID" in str(e.get("type", "")).upper()
@@ -960,7 +952,6 @@ def _build_next_watch(
             f"({total_mw:,.0f} MW total); price impact pending next dispatch interval."
         )
 
-    # ── Sprint R: Recent AEMO notice watch ──────────────────────────
     if news is not None:
         notices = getattr(news, "notices", []) or []
         if notices:
@@ -988,7 +979,6 @@ def _build_next_watch(
                         f"{age_min} min ago; conditions may still be evolving."
                     )
 
-    # ── Sprint R: Watch closed — price normalised from spike ─────────
     if price is not None and price < 150:
         # Look for evidence that price was recently in spike territory via auto_commentary
         recent_spike = False

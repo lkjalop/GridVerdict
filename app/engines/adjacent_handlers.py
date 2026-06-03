@@ -200,7 +200,10 @@ async def handle_investment_price_context(
                 f"(real 2023-24 A$, Step Change scenario)"
             )
     else:
-        isp_bullets = ["ISP data not yet loaded — download AEMO IASR 2024 and run isp_client.parse_iasr_excel()"]
+        isp_bullets = [
+            "ISP price data unavailable for this query.",
+            "Source: aemo.com.au/isp — download IASR 2024 Excel appendices for live trajectory data.",
+        ]
 
     # Coal retirements relevant to this region
     coal_bullets = []
@@ -275,7 +278,7 @@ async def handle_investment_price_context(
             "PPA/offtake pricing (commercial negotiation)",
         ],
         "upgrade_path": [
-            "Run: isp_client.parse_iasr_excel() after downloading AEMO IASR 2024 for live ISP data",
+            "For live ISP data: download AEMO IASR 2024 and parse with isp_client.parse_iasr_excel()",
             "Ask GridVerdict: 'What is the current price in NSW?' for real-time market context",
         ],
         "adjacent_context": adjacent,

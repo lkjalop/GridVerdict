@@ -248,3 +248,48 @@ async def _increment_cursor_counts(
         return
     cursor.files_completed = (cursor.files_completed or 0) + files_ok
     cursor.files_failed = (cursor.files_failed or 0) + files_failed
+
+
+async def _upsert_rooftop_rows(session, rows: list[dict]) -> None:
+    """Upsert ROOFTOP_PV actual/forecast rows into rooftop_solar_intervals.
+
+    Conflict target: (region, interval_datetime).
+    When both actual and forecast exist we update all three columns;
+    when only one arrives (e.g. actual file before forecast file) we merge
+    non-null values so partial ingest doesn't wipe existing data.
+    """
+    if not rows:
+        return
+    import uuid as _uuid
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from app.db.models import RooftopSolarInterval
+
+    try:
+        from sqlalchemy.dialects.postgresql import insert as _insert
+    except ImportError:
+        from sqlalchemy.dialects.sqlite import insert as _insert
+
+    for i in range(0, len(rows), _BULK_BATCH):
+        batch = rows[i : i + _BULK_BATCH]
+        records = [
+            {
+                "id": str(_uuid.uuid4()),
+                "region": r["region"],
+                "interval_datetime": r["interval_datetime"],
+                "actual_mw": r.get("actual_mw"),
+                "forecast_mw": r.get("forecast_mw"),
+                "delta_mw": r.get("delta_mw"),
+            }
+            for r in batch
+        ]
+        stmt = _insert(RooftopSolarInterval).values(records)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["region", "interval_datetime"],
+            set_={
+                "actual_mw": stmt.excluded.actual_mw,
+                "forecast_mw": stmt.excluded.forecast_mw,
+                "delta_mw": stmt.excluded.delta_mw,
+            },
+        )
+        await session.execute(stmt)

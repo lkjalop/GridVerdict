@@ -397,6 +397,33 @@ class ObserverEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class RooftopSolarInterval(Base):
+    """30-minute rooftop solar generation actuals vs AEMO forecast per NEM region.
+
+    Actual comes from ROOFTOP_PV_ACTUAL_SCADA; forecast from ROOFTOP_PV_FORECAST_SCADA.
+    delta_mw = actual_mw - forecast_mw: positive = more solar than expected (price suppressing),
+    negative = less solar than expected (price supporting).
+    Upserts on (region, interval_datetime) so re-ingestion is safe.
+    """
+    __tablename__ = "rooftop_solar_intervals"
+    __table_args__ = (
+        Index("ix_rooftop_region_time", "region", "interval_datetime"),
+        UniqueConstraint("region", "interval_datetime", name="uq_rooftop_region_time"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    region: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    interval_datetime: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True,
+    )
+    actual_mw: Mapped[float | None] = mapped_column(Float, comment="ROOFTOP_PV_ACTUAL_SCADA power_mw")
+    forecast_mw: Mapped[float | None] = mapped_column(Float, comment="ROOFTOP_PV_FORECAST_SCADA power_mw")
+    delta_mw: Mapped[float | None] = mapped_column(
+        Float, comment="actual_mw - forecast_mw; positive = more solar than expected"
+    )
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class WeatherObservation(Base):
     """Persisted weather consensus snapshot per NEM region, written every poll cycle.
 

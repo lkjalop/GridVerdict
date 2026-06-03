@@ -45,6 +45,7 @@ from app.mcp.aemo_parsers import (
     parse_mmsdm_bid_content,
     parse_mmsdm_unit_content,
     parse_mmsdm_fcas_content,
+    parse_mmsdm_rooftop_content,
     _TABLE_FILENAME_ALIASES,
     _TABLE_ARCHIVE_ALIASES,
     _ARCHIVE_FORMAT_START,
@@ -62,6 +63,7 @@ from app.mcp.aemo_db import (
     _upsert_unit_rows,
     _upsert_bid_rows,
     _upsert_fcas_rows,
+    _upsert_rooftop_rows,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,6 +94,8 @@ _MMSDM_TABLES = {
     "DUDETAILSUMMARY": "unit_metadata",
     "BIDDAYOFFER": "bid_offer",
     "BIDPEROFFER": "bid_offer",
+    "ROOFTOP_PV_ACTUAL_SCADA": "rooftop_solar",
+    "ROOFTOP_PV_FORECAST_SCADA": "rooftop_solar",
 }
 
 
@@ -450,6 +454,7 @@ async def backfill_mmsdm_archive(
                         driver_rows = parse_mmsdm_driver_content(content, short_ref)
                         unit_payload = parse_mmsdm_unit_content(content, short_ref)
                         bid_rows = parse_mmsdm_bid_content(content, short_ref)
+                        rooftop_rows = parse_mmsdm_rooftop_content(content, short_ref)
 
                         async with db_session_factory() as session:
                             await _upsert_rows(session, price_rows)
@@ -458,6 +463,8 @@ async def backfill_mmsdm_archive(
                             await _upsert_generator_units(session, unit_payload["metadata_rows"])
                             await _upsert_unit_rows(session, unit_payload["unit_rows"])
                             await _upsert_bid_rows(session, bid_rows)
+                            if rooftop_rows:
+                                await _upsert_rooftop_rows(session, rooftop_rows)
                             await session.commit()
 
                         current_partial_ok.add(url)
@@ -477,10 +484,13 @@ async def backfill_mmsdm_archive(
                         counts["bid_rows"] += len(bid_rows)
                         counts.setdefault("fcas_rows", 0)
                         counts["fcas_rows"] += len(fcas_rows)
+                        counts.setdefault("rooftop_rows", 0)
+                        counts["rooftop_rows"] += len(rooftop_rows)
                         logger.info(
-                            "MMSDM %s: +%d price +%d fcas +%d driver +%d unit +%d bid rows",
+                            "MMSDM %s: +%d price +%d fcas +%d driver +%d unit +%d bid +%d rooftop rows",
                             url.split("/")[-1], len(price_rows), len(fcas_rows),
                             len(driver_rows), len(unit_payload["unit_rows"]), len(bid_rows),
+                            len(rooftop_rows),
                         )
 
                     await asyncio.sleep(request_delay)
