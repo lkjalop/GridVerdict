@@ -35,6 +35,8 @@ class ChangeType(str, Enum):
     DATA_STALE = "data_stale"
     DATA_RECOVERED = "data_recovered"
     WATCH_CLOSED = "watch_closed"
+    # Sprint Z: generator trip detection
+    GENERATOR_TRIP = "generator_trip"
 
 
 # Seconds between repeated events of the same type per region.
@@ -52,6 +54,8 @@ _COOLDOWN_SECONDS: dict[ChangeType, int] = {
     ChangeType.DATA_STALE: 1800,                  # 30 min — suppress during sustained outage
     ChangeType.DATA_RECOVERED: 300,               # 5 min
     ChangeType.WATCH_CLOSED: 300,                 # 5 min
+    # Sprint Z
+    ChangeType.GENERATOR_TRIP: 1800,              # 30 min — one alert per unit per outage
 }
 
 # QueryDecomposition parameters keyed by ChangeType — injected into the
@@ -125,7 +129,57 @@ _CHANGE_DECOMPOSITION: dict[ChangeType, dict] = {
         requires_history=True,
         causal_targets=["constraint", "demand"],
     ),
+    # Sprint Z
+    ChangeType.GENERATOR_TRIP: dict(
+        requires_why=True,
+        causal_targets=["generation", "headroom", "constraint"],
+    ),
 }
+
+# Minimum output (MW) for a unit to be considered "running" before a trip.
+# Filters out small peakers, DSP, and battery units that cycle normally.
+_TRIP_MIN_PREV_MW = 150.0
+_TRIP_MAX_CURR_MW = 20.0   # output must drop to near-zero to qualify as a trip
+
+
+def detect_generator_trips(
+    prev_dispatch: dict[str, float],
+    curr_dispatch: dict[str, float],
+    region: str,
+    valid_time: "datetime",
+) -> "list[MaterialChange]":
+    """Detect large generator units that dropped from running to near-zero output.
+
+    Args:
+        prev_dispatch: {duid: total_cleared_mw} from previous 5-min interval
+        curr_dispatch: {duid: total_cleared_mw} from current 5-min interval
+
+    Called from commentary/engine.py after the snapshot comparison.
+    Only fires for units above _TRIP_MIN_PREV_MW — excludes batteries and peakers.
+    """
+    changes: list[MaterialChange] = []
+    for duid, prev_mw in prev_dispatch.items():
+        if prev_mw < _TRIP_MIN_PREV_MW:
+            continue
+        curr_mw = curr_dispatch.get(duid, 0.0)
+        if curr_mw > _TRIP_MAX_CURR_MW:
+            continue
+        drop = prev_mw - curr_mw
+        sev = "CRITICAL" if prev_mw >= 500 else "HIGH"
+        changes.append(MaterialChange(
+            change_type=ChangeType.GENERATOR_TRIP,
+            region=region,
+            valid_time=valid_time,
+            severity=sev,
+            prev_value=prev_mw,
+            curr_value=curr_mw,
+            threshold_crossed=_TRIP_MIN_PREV_MW,
+            description=(
+                f"{region} generator trip: {duid} output dropped "
+                f"{prev_mw:.0f} → {curr_mw:.0f} MW (−{drop:.0f} MW)"
+            ),
+        ))
+    return changes
 
 
 @dataclass

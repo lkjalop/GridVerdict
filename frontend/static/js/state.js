@@ -607,6 +607,34 @@ export function gridverdictApp() {
       }
     },
 
+    // ── FCAS Dashboard ────────────────────────────────────────────
+    async loadFcasDashboard() {
+      const panel = document.querySelector('#vp-fcas')?.__x?.$data
+        || document.querySelector('[id="vp-fcas"]')?.closest('[x-data]')?.__x?.$data;
+      if (!panel) return;
+      panel.fcasLoading = true; panel.fcasErr = null;
+      try {
+        const hours = panel.fcasHours || 24;
+        const data = await api(`/api/market/fcas?region=${encodeURIComponent(this.region)}&hours=${hours}`);
+        panel.fcasData = data;
+        if (data?.series?.length) {
+          setTimeout(() => window.gvCharts?.renderFcasChart(data), 50);
+        }
+      } catch (e) { panel.fcasErr = e.message; }
+      finally { panel.fcasLoading = false; }
+    },
+
+    // ── NEM Network Schematic ─────────────────────────────────────
+    async loadNetworkMap() {
+      const panel = document.querySelector('[x-data*="networkData"]')?.__x?.$data;
+      if (!panel) return;
+      panel.networkLoading = true; panel.networkErr = null;
+      try {
+        panel.networkData = await api('/api/market/network');
+      } catch (e) { panel.networkErr = e.message; }
+      finally { panel.networkLoading = false; }
+    },
+
     // ── Model status ──────────────────────────────────────────────
     async refreshModelStatus() {
       this.modelStatusLoading = true;

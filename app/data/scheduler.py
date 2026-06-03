@@ -466,6 +466,29 @@ async def _job_dispatch_refresh() -> None:
         for _r, _clist in _region_constraints.items():
             await cache.set(f"constraints_{_r}", _clist, ttl=120)
 
+        # Build current-tick unit dispatch dict for generator trip detection.
+        # Written to unit_dispatch_curr_{region} NOW (before process_tick),
+        # then promoted to unit_dispatch_prev_{region} AFTER process_tick so
+        # next tick's comparison is correct (prev = last tick, curr = this tick).
+        _curr_dispatch_by_region: dict[str, dict[str, float]] = {}
+        if getattr(snapshot, "unit_dispatch_rows", None):
+            try:
+                from app.engines.commentary.detector import _TRIP_MIN_PREV_MW as _trip_thresh
+                for _ud in snapshot.unit_dispatch_rows:
+                    _duid = _ud.get("duid") or ""
+                    _mw = float(_ud.get("totalcleared") or _ud.get("total_cleared_mw") or 0.0)
+                    _region_guess = None
+                    for _prefix, _r in [("N", "NSW1"), ("V", "VIC1"), ("Q", "QLD1"), ("S", "SA1"), ("T", "TAS1")]:
+                        if _duid.upper().startswith(_prefix):
+                            _region_guess = _r
+                            break
+                    if _region_guess and _mw >= _trip_thresh:
+                        _curr_dispatch_by_region.setdefault(_region_guess, {})[_duid] = _mw
+                for _r, _disp in _curr_dispatch_by_region.items():
+                    await cache.set(f"unit_dispatch_curr_{_r}", _disp, ttl=180)
+            except Exception as _ud_exc:
+                logger.debug("Unit dispatch cache write failed (non-fatal): %s", _ud_exc)
+
         # Feed LNN trainer buffer — pass enriched interval dict so v2 features fire
         from app.engines.forecasting.inference import feed_interval
         for region_code, dp in snapshot.regions.items():
@@ -531,6 +554,11 @@ async def _job_dispatch_refresh() -> None:
                     await _try_publish("commentary_created", evt.to_dict(), region=region_code)
             except Exception as _exc:
                 logger.debug("Commentary engine failed for %s: %s", region_code, _exc)
+
+        # Promote curr unit dispatch → prev for next tick's generator trip comparison.
+        # Done AFTER process_tick so the comparison uses prev=last-tick, curr=this-tick.
+        for _r, _disp in _curr_dispatch_by_region.items():
+            await cache.set(f"unit_dispatch_prev_{_r}", _disp, ttl=180)
 
         # Drift detection: compare actual prices to cached forecast P50s
         # On drift: invalidate forecast cache so next query triggers a full retrain
@@ -824,17 +852,6 @@ async def _job_nem_news_refresh() -> None:
         _job_exit("nem_news_refresh")
 
 
-# Monthly mean temperatures (°C) per NEM region — used to compute temp deviation.
-# Sourced from BOM climate averages for the capital city of each region.
-_SEASONAL_TEMP_NORMS: dict[str, dict[int, float]] = {
-    "NSW1": {1: 26, 2: 26, 3: 24, 4: 20, 5: 16, 6: 13, 7: 12, 8: 14, 9: 17, 10: 20, 11: 23, 12: 25},
-    "VIC1": {1: 26, 2: 26, 3: 23, 4: 18, 5: 14, 6: 11, 7: 10, 8: 11, 9: 14, 10: 17, 11: 21, 12: 24},
-    "QLD1": {1: 30, 2: 30, 3: 28, 4: 26, 5: 23, 6: 20, 7: 19, 8: 21, 9: 24, 10: 28, 11: 30, 12: 31},
-    "SA1":  {1: 30, 2: 30, 3: 26, 4: 21, 5: 17, 6: 14, 7: 12, 8: 14, 9: 17, 10: 22, 11: 26, 12: 29},
-    "TAS1": {1: 21, 2: 21, 3: 19, 4: 15, 5: 12, 6: 9,  7: 8,  8: 9,  9: 12, 10: 15, 11: 17, 12: 19},
-}
-
-
 async def _job_weather_refresh() -> None:
     """Fetch weather consensus for each NEM region — cache + persist to DB."""
     _job_enter("weather_refresh")
@@ -842,7 +859,7 @@ async def _job_weather_refresh() -> None:
         import asyncio
         from datetime import timezone as _tz
         from app.data.cache import get_cache
-        from app.mcp.weather_client import WeatherConsensusClient
+        from app.mcp.weather_client import WeatherConsensusClient, SEASONAL_TEMP_NORMS as _SEASONAL_TEMP_NORMS
         from app.db.session import db_session
         from app.db.models import WeatherObservation
         from sqlalchemy.dialects.postgresql import insert as pg_insert

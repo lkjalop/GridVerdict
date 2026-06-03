@@ -19,6 +19,7 @@ import { renderSecurityPanel, stopSecurityPoll, renderObserverBadge } from './se
 import { getAnalogChart, destroyAnalogChart } from './charts/analog.js';
 import { getBacktestChart, destroyBacktestChart } from './charts/backtest_pnl.js';
 import { renderFuelMix, destroyFuelMixChart } from './charts/fuel_mix.js';
+import { renderFcasChart } from './charts/fcas.js';
 
 // ── Expose to Alpine ──────────────────────────────────────────────────
 window.gridverdictApp = gridverdictApp;
@@ -38,6 +39,10 @@ window.gvCharts = {
 
   renderFuelMix(data) {
     renderFuelMix(data, 'fuel-mix-chart');
+  },
+
+  renderFcasChart(data) {
+    renderFcasChart(data, 'fcas-chart');
   },
 
   initSwimlane(region = 'NSW1') {
@@ -83,34 +88,22 @@ window.gvCharts = {
   },
 };
 
-// ── Patch state.js refreshMarket to also push to chart ───────────────
-// We monkey-patch after Alpine is ready so we don't depend on import order.
-document.addEventListener('alpine:init', () => {
-  // Alpine is initialising — components are registered
-  // Chart init happens lazily when the market panel is first shown
-});
-
 document.addEventListener('alpine:initialized', () => {
-  // DOM is live; initialise chart on the market panel if it's visible
   const chartEl = document.getElementById('chart-price');
   if (chartEl && chartEl.offsetParent !== null) {
     window.gvCharts.initSwimlane();
   }
-
-  // Intercept region changes to update chart
-  const regionSelect = document.querySelector('select[x-model="region"]');
-  if (regionSelect) {
-    regionSelect.addEventListener('change', (e) => {
-      window.gvCharts.changeRegion(e.target.value);
-    });
-  }
 });
 
 // ── Market snapshot → chart bridge ────────────────────────────────────
-// state.js calls window.gvCharts.pushDispatch after refreshMarket succeeds.
-// We hook this by wrapping the fetch response in state.js via a custom event.
+// Dispatched by state.js after every refreshMarket(). Drives the swimlane chart.
+// Region-change detection here avoids a fragile DOM-query on the select element.
 window.addEventListener('gv:market-updated', (e) => {
   const { region, price_rrp, demand_mw, regime, valid_time } = e.detail;
+  if (region !== window.gvCharts._lastRegion) {
+    window.gvCharts.changeRegion(region);
+    window.gvCharts._lastRegion = region;
+  }
   const time = new Date(valid_time).toLocaleTimeString('en-AU', {
     hour: '2-digit', minute: '2-digit', timeZone: 'Australia/Sydney',
   });

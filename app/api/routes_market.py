@@ -545,6 +545,88 @@ def _db_datetime_param(dt: datetime) -> datetime | str:
     return dt
 
 
+# ── FCAS dashboard endpoint ──────────────────────────────────────────
+
+@router.get("/fcas")
+async def get_fcas_dashboard(
+    region: str = Query(default="NSW1"),
+    hours: int = Query(default=24, ge=1, le=168),
+    user: TokenPayload = Depends(get_current_user),
+):
+    """Return time series for all 8 FCAS services over the last N hours.
+
+    Used by the FCAS dashboard tab.  Returns one series per service with
+    timestamps, values, and simple statistics (avg, max, elevated_pct).
+    """
+    from sqlalchemy import select, desc
+    from app.db.session import db_session
+    from app.db.models import FcasPriceEvent
+
+    region = region.upper()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    _SERVICES = [
+        ("raise_reg_rrp",   "Raise Reg",   "raise"),
+        ("raise_6sec_rrp",  "Raise 6s",    "raise"),
+        ("raise_60sec_rrp", "Raise 60s",   "raise"),
+        ("raise_5min_rrp",  "Raise 5min",  "raise"),
+        ("lower_reg_rrp",   "Lower Reg",   "lower"),
+        ("lower_6sec_rrp",  "Lower 6s",    "lower"),
+        ("lower_60sec_rrp", "Lower 60s",   "lower"),
+        ("lower_5min_rrp",  "Lower 5min",  "lower"),
+    ]
+
+    try:
+        async with db_session() as session:
+            result = await session.execute(
+                select(FcasPriceEvent)
+                .where(
+                    FcasPriceEvent.region == region,
+                    FcasPriceEvent.valid_time >= cutoff,
+                )
+                .order_by(desc(FcasPriceEvent.valid_time))
+                .limit(hours * 12 + 10)   # 12 intervals per hour, small buffer
+            )
+            rows = result.scalars().all()
+
+        if not rows:
+            return {"region": region, "hours": hours, "series": [], "summary": {}}
+
+        # Build time series per service
+        timestamps = [r.valid_time.isoformat() for r in rows]
+        series = []
+        summary = {}
+        for field, label, direction in _SERVICES:
+            values = [round(float(getattr(r, field) or 0), 2) for r in rows]
+            non_zero = [v for v in values if v > 0]
+            avg_val = round(sum(non_zero) / len(non_zero), 2) if non_zero else 0.0
+            max_val = round(max(non_zero), 2) if non_zero else 0.0
+            elevated_count = sum(1 for v in values if v > 50)
+            elevated_pct = round(elevated_count / len(values) * 100) if values else 0
+            series.append({
+                "field":        field,
+                "label":        label,
+                "direction":    direction,
+                "timestamps":   timestamps,
+                "values":       values,
+                "avg":          avg_val,
+                "max":          max_val,
+                "elevated_pct": elevated_pct,
+            })
+            summary[field] = {"avg": avg_val, "max": max_val, "elevated_pct": elevated_pct}
+
+        return {
+            "region": region,
+            "hours": hours,
+            "n_intervals": len(rows),
+            "series": series,
+            "summary": summary,
+        }
+    except Exception as exc:
+        logger.warning("FCAS dashboard failed for %s: %s", region, exc)
+        return {"region": region, "hours": hours, "series": [], "summary": {}, "error": str(exc)}
+
+
 # ── Procurement windows endpoint ─────────────────────────────────────
 
 @router.get("/procurement-windows")
@@ -640,25 +722,34 @@ async def get_procurement_windows(
             for hr in range(24)
         ]
 
-        # Build recommended windows (group consecutive cheap hours)
-        windows: list[dict] = []
-        for start in [0, 2, 23, 1, 3, 22, 10, 11]:   # rough overnight/midday priorities
-            if start in cheap_hours:
-                avg_p = hourly.get(start, {}).get("avg", 0)
-                next_h = (start + 1) % 24
-                avg_p2 = hourly.get(next_h, {}).get("avg", 0)
-                window_avg = round((avg_p + avg_p2) / 2, 1)
-                label = f"{start:02d}:00–{(start+2)%24:02d}:00"
-                note = (
-                    "overnight baseload" if 0 <= start <= 5
-                    else "solar ramp" if 9 <= start <= 13
-                    else "early morning"
-                )
-                windows.append({"label": label, "avg_price": window_avg, "note": note})
-                if len(windows) >= 3:
-                    break
+        # Build recommended windows from sorted hourly data — find cheapest 2h windows.
+        # Score each possible 2h start hour by the average of that hour and the next.
+        window_scores: list[tuple[float, int]] = []
+        for start in range(24):
+            next_h = (start + 1) % 24
+            avg_p = hourly.get(start, {}).get("avg", 0)
+            avg_p2 = hourly.get(next_h, {}).get("avg", 0)
+            window_scores.append((round((avg_p + avg_p2) / 2, 1), start))
+        window_scores.sort()  # cheapest first
 
-        windows.sort(key=lambda w: w["avg_price"])
+        windows: list[dict] = []
+        used_hours: set[int] = set()
+        for window_avg, start in window_scores:
+            # Skip if this window overlaps one already chosen
+            next_h = (start + 1) % 24
+            if start in used_hours or next_h in used_hours:
+                continue
+            used_hours.add(start)
+            used_hours.add(next_h)
+            note = (
+                "overnight baseload" if 0 <= start <= 5 or start >= 22
+                else "solar peak (cheap renewable)" if 9 <= start <= 14
+                else "shoulder period"
+            )
+            label = f"{start:02d}:00–{(start+2)%24:02d}:00"
+            windows.append({"label": label, "avg_price": window_avg, "note": note})
+            if len(windows) >= 3:
+                break
         return {
             "region": region,
             "current_price": round(current_price, 2),
@@ -719,3 +810,72 @@ async def get_causal_chain(
             "confidence": "low",
             "data_gaps": [f"Causal chain unavailable: {exc}"],
         }
+
+
+# ── NEM network schematic endpoint ───────────────────────────────────
+
+@router.get("/network")
+async def get_network_state(
+    user: TokenPayload = Depends(get_current_user),
+):
+    """Return current multi-region dispatch state + interconnector flows for the NEM schematic map."""
+    from app.data.cache import get_cache
+
+    _INTERCONNECTORS = [
+        # (id, from_region, to_region, limit_mw, label_x, label_y)
+        ("QNI",    "QLD1", "NSW1", 1380, 160, 100),
+        ("NSWVIC", "NSW1", "VIC1", 1350, 320, 100),
+        ("V-SA",   "VIC1", "SA1",  650,  480, 100),
+        ("BLNKTAS","VIC1", "TAS1", 478,  420, 158),
+    ]
+
+    cache = get_cache()
+    snap = await cache.get("dispatch_snapshot") or {}
+    raw_regions = snap.get("regions") or {}
+    valid_time = snap.get("valid_time")
+
+    regions: dict = {}
+    for rid in ("QLD1", "NSW1", "VIC1", "SA1", "TAS1"):
+        r = raw_regions.get(rid) or {}
+        price = float(r.get("price_rrp") or 0.0)
+        demand = float(r.get("demand_mw") or 0.0)
+        avail  = float(r.get("availability_mw") or demand)
+        headroom = max(avail - demand, 0.0) if avail else None
+        regime = r.get("regime") or classify_regime(price)
+        regions[rid] = {
+            "price": round(price, 2),
+            "demand": round(demand, 1),
+            "availability_mw": round(avail, 1),
+            "headroom_mw": round(headroom, 1) if headroom is not None else None,
+            "regime": regime,
+        }
+
+    # Pull interconnector flows from constraints cache (set by scheduler each tick)
+    interconnectors = []
+    for (ic_id, fr, to, limit, lx, ly) in _INTERCONNECTORS:
+        ic_cache = await cache.get(f"constraints_{fr}") or []
+        flow = next((c.get("flow_mw") for c in ic_cache
+                     if isinstance(c, dict) and ic_id in (c.get("constraint_id") or "")), None)
+        if flow is None:
+            ic_cache2 = await cache.get(f"constraints_{to}") or []
+            flow = next((c.get("flow_mw") for c in ic_cache2
+                         if isinstance(c, dict) and ic_id in (c.get("constraint_id") or "")), None)
+        flow_mw = round(float(flow), 0) if flow is not None else 0
+        flow_pct = round(abs(flow_mw) / limit * 100, 0) if limit else 0
+        interconnectors.append({
+            "name": ic_id,
+            "from": fr,
+            "to": to,
+            "limit_mw": limit,
+            "flow_mw": flow_mw,
+            "flow_pct": flow_pct,
+            "congested": flow_pct >= 90,
+            "label_x": lx,
+            "label_y": ly,
+        })
+
+    return {
+        "regions": regions,
+        "interconnectors": interconnectors,
+        "valid_time": valid_time,
+    }

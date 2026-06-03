@@ -134,6 +134,20 @@ class CommentaryEngine:
             curr.weather_pressure = _compute_weather_pressure(weather_cache)
 
         changes = detect(prev, curr, notices)
+
+        # Sprint Z: generator trip detection — compare unit dispatch prev/curr
+        try:
+            from app.engines.commentary.detector import detect_generator_trips
+            _prev_dispatch: dict[str, float] = await cache.get(f"unit_dispatch_prev_{region}") or {}
+            _curr_dispatch: dict[str, float] = await cache.get(f"unit_dispatch_curr_{region}") or {}
+            if _prev_dispatch and _curr_dispatch:
+                trip_changes = detect_generator_trips(
+                    _prev_dispatch, _curr_dispatch, region, valid_time
+                )
+                changes.extend(trip_changes)
+        except Exception as _trip_exc:
+            logger.debug("Generator trip detection failed (non-fatal): %s", _trip_exc)
+
         events: list[CommentaryEvent] = []
 
         baseline_enabled = isinstance(await cache.get("dispatch_snapshot"), dict)

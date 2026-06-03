@@ -286,6 +286,10 @@
              @click="switchViewportTab('models'); refreshModelStatus()">Models</div>
         <div class="vp-tab" :class="viewport.activeTab==='data'?'vp-tab--active':''"
              @click="switchViewportTab('data'); refreshDataStatus()">Data</div>
+        <div class="vp-tab" :class="viewport.activeTab==='fcas'?'vp-tab--active':''"
+             @click="switchViewportTab('fcas'); loadFcasDashboard()">FCAS</div>
+        <div class="vp-tab" :class="viewport.activeTab==='network'?'vp-tab--active':''"
+             @click="switchViewportTab('network'); loadNetworkMap()">NEM Network</div>
         <div class="vp-tab" :class="viewport.activeTab==='audit'?'vp-tab--active':''"
              @click="switchViewportTab('audit')">Audit</div>
         <div class="vp-tab" :class="viewport.activeTab==='portfolio'?'vp-tab--active':''"
@@ -646,7 +650,8 @@
               </template>
 
               <!-- Structured causal chain — lazy-loaded from /api/market/causal-chain -->
-              <template x-if="viewport.data.current_state?.price_rrp && viewport.data.current_state?.valid_time">
+              <!-- Uses dispatch_valid_time (the interval the answer is ABOUT, not current live time) -->
+              <template x-if="viewport.data.dispatch_valid_time && viewport.data.dispatch_price_rrp">
                 <div class="card" style="padding:0;"
                      x-data="{
                        chain: null, loading: false, err: null,
@@ -654,11 +659,10 @@
                          if (this.chain || this.loading) return;
                          this.loading = true;
                          try {
-                           const cs = viewport.data.current_state;
                            const r = await api('/api/market/causal-chain?' + new URLSearchParams({
-                             region: cs.region || selectedRegion,
-                             valid_time: cs.valid_time,
-                             price: cs.price_rrp,
+                             region: viewport.data.decomposition?.region || selectedRegion,
+                             valid_time: viewport.data.dispatch_valid_time,
+                             price: viewport.data.dispatch_price_rrp,
                            }));
                            this.chain = r;
                          } catch(e) { this.err = e.message; }
@@ -1783,6 +1787,260 @@
                 </template>
 
                 <div style="font-size:11px;color:var(--text-muted);margin-top:12px;" x-text="`As of ${dataStatus.timestamp?.slice(0,19)}Z`"></div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- ── Panel: FCAS Dashboard ─────────────────────────── -->
+        <div class="vp-panel" :class="viewport.activeTab==='fcas' && !viewport.loading ? 'active' : ''"
+             x-data="{
+               fcasData: null, fcasLoading: false, fcasErr: null, fcasHours: 24,
+               init() { this.$watch('$root.selectedRegion', () => { this.fcasData = null; if (viewport.activeTab === 'fcas') this.load(); }); },
+             }">
+          <div id="vp-fcas">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+              <div class="section-header" style="margin:0;">FCAS Ancillary Service Prices</div>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <select class="select" x-model.number="fcasHours" @change="fcasData=null; loadFcasDashboard()">
+                  <option value="6">6h</option><option value="24" selected>24h</option>
+                  <option value="48">48h</option><option value="168">7d</option>
+                </select>
+                <button class="btn btn--ghost" @click="fcasData=null; loadFcasDashboard()" style="font-size:11px;padding:3px 10px;">↻ Refresh</button>
+              </div>
+            </div>
+
+            <template x-if="fcasLoading && !fcasData">
+              <div style="display:flex;align-items:center;gap:8px;color:var(--text-muted);padding:24px 0;"><span class="spinner"></span> Loading FCAS data…</div>
+            </template>
+
+            <template x-if="fcasErr && !fcasData">
+              <div style="color:var(--verdict-low);font-size:12px;" x-text="'FCAS unavailable: ' + fcasErr"></div>
+            </template>
+
+            <!-- Summary KPI row -->
+            <template x-if="fcasData?.summary">
+              <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
+                <template x-for="[field, stats] in Object.entries(fcasData.summary).filter(([f]) => f.includes('reg'))" :key="field">
+                  <div class="card" style="flex:1;min-width:120px;padding:10px 14px;">
+                    <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;" x-text="field.replace('_rrp','').replace(/_/g,' ')"></div>
+                    <div style="font-size:20px;font-weight:700;font-family:var(--font-mono);margin:4px 0;"
+                         :style="`color:${stats.max>200?'var(--verdict-insufficient)':stats.max>50?'var(--verdict-low)':'var(--text-primary)'}`"
+                         x-text="`$${stats.avg}/MWh`"></div>
+                    <div style="font-size:10px;color:var(--text-muted);" x-text="`peak $${stats.max} · ${stats.elevated_pct}% elevated`"></div>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- Multi-line chart (ECharts) -->
+            <template x-if="fcasData?.series?.length">
+              <div>
+                <div class="card" style="padding:12px;">
+                  <div id="fcas-chart" style="height:320px;"
+                       x-init="$nextTick(() => window.gvCharts?.renderFcasChart(fcasData))"></div>
+                </div>
+
+                <!-- Service detail table -->
+                <div class="card" style="margin-top:12px;padding:0;">
+                  <div class="card__header"><span class="card__label">All 8 FCAS Services</span></div>
+                  <div class="card__body" style="padding:0;">
+                    <table style="width:100%;border-collapse:collapse;font-size:11px;">
+                      <thead>
+                        <tr style="border-bottom:1px solid var(--border);">
+                          <th style="padding:6px 12px;text-align:left;color:var(--text-muted);">Service</th>
+                          <th style="padding:6px 12px;text-align:right;color:var(--text-muted);">Avg $/MWh</th>
+                          <th style="padding:6px 12px;text-align:right;color:var(--text-muted);">Peak $/MWh</th>
+                          <th style="padding:6px 12px;text-align:right;color:var(--text-muted);">Elevated %</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="s in fcasData.series" :key="s.field">
+                          <tr style="border-bottom:1px solid var(--border-subtle);">
+                            <td style="padding:6px 12px;">
+                              <span :style="`display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:${s.direction==='raise'?'#f97316':'#60a5fa'}`"></span>
+                              <span x-text="s.label"></span>
+                            </td>
+                            <td style="padding:6px 12px;text-align:right;font-family:var(--font-mono);"
+                                :style="`color:${s.avg>50?'var(--verdict-low)':'var(--text-secondary)'}`"
+                                x-text="`$${s.avg}`"></td>
+                            <td style="padding:6px 12px;text-align:right;font-family:var(--font-mono);"
+                                :style="`color:${s.max>200?'var(--verdict-insufficient)':s.max>50?'var(--verdict-low)':'var(--text-secondary)'}`"
+                                x-text="`$${s.max}`"></td>
+                            <td style="padding:6px 12px;text-align:right;"
+                                :style="`color:${s.elevated_pct>20?'var(--verdict-insufficient)':s.elevated_pct>5?'var(--verdict-low)':'var(--text-muted)'}`"
+                                x-text="`${s.elevated_pct}%`"></td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- ── Panel: NEM Network Schematic ── -->
+        <div class="vp-panel" :class="viewport.activeTab==='network' && !viewport.loading ? 'active' : ''"
+             x-data="{ networkData: null, networkLoading: false, networkErr: null,
+               init() { this.$watch('$root.selectedRegion', () => { if (viewport.activeTab === 'network') loadNetworkMap(); }); }
+             }">
+          <div style="padding:12px 16px;">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+              <span style="font-size:13px;font-weight:600;color:var(--text-primary);">NEM Network — Interconnector Flows</span>
+              <button class="btn btn--ghost" @click="loadNetworkMap()" style="font-size:11px;padding:3px 10px;">↻ Refresh</button>
+            </div>
+
+            <!-- Loading / error states -->
+            <template x-if="networkLoading && !networkData">
+              <div style="color:var(--text-muted);font-size:12px;padding:20px 0;">Loading network state…</div>
+            </template>
+            <template x-if="networkErr && !networkData">
+              <div style="color:var(--verdict-insufficient);font-size:12px;padding:8px;">Error: <span x-text="networkErr"></span></div>
+            </template>
+
+            <template x-if="networkData">
+              <div>
+                <!-- Circuit-diagram schematic: QLD──NSW──VIC──SA, VIC──TAS branch -->
+                <div style="overflow-x:auto;padding:8px 0;">
+                  <svg viewBox="0 0 720 240" style="width:100%;max-width:720px;height:auto;display:block;"
+                       xmlns="http://www.w3.org/2000/svg">
+                    <!-- Region node helpers — cx values: QLD=80, NSW=240, VIC=400, SA=560, TAS=400 cy=200 -->
+
+                    <!-- Interconnector lines -->
+                    <!-- QNI: QLD─NSW -->
+                    <line x1="120" y1="100" x2="200" y2="100" stroke="var(--border)" stroke-width="4" stroke-linecap="round"/>
+                    <!-- VIC-NSW: NSW─VIC -->
+                    <line x1="280" y1="100" x2="360" y2="100" stroke="var(--border)" stroke-width="4" stroke-linecap="round"/>
+                    <!-- Heywood: VIC─SA -->
+                    <line x1="440" y1="100" x2="520" y2="100" stroke="var(--border)" stroke-width="4" stroke-linecap="round"/>
+                    <!-- Basslink: VIC─TAS (diagonal down) -->
+                    <line x1="400" y1="120" x2="400" y2="180" stroke="var(--border)" stroke-width="3" stroke-dasharray="6 3" stroke-linecap="round"/>
+
+                    <!-- Interconnector labels -->
+                    <text x="160" y="88" text-anchor="middle" font-size="9" fill="var(--text-muted)">QNI 1380MW</text>
+                    <text x="320" y="88" text-anchor="middle" font-size="9" fill="var(--text-muted)">VIC-NSW 1350MW</text>
+                    <text x="480" y="88" text-anchor="middle" font-size="9" fill="var(--text-muted)">Heywood 650MW</text>
+                    <text x="420" y="158" font-size="9" fill="var(--text-muted)">Basslink 478MW</text>
+
+                    <!-- Flow arrows — direction & colour driven by networkData -->
+                    <template x-for="ic in (networkData.interconnectors || [])" :key="ic.name">
+                      <g>
+                        <text
+                          :x="ic.label_x" :y="ic.label_y + 16"
+                          text-anchor="middle" font-size="10" font-weight="600"
+                          :fill="ic.congested ? 'var(--verdict-insufficient)' : ic.flow_pct > 70 ? 'var(--verdict-low)' : 'var(--text-secondary)'"
+                          x-text="`${ic.flow_mw > 0 ? '▶' : '◀'} ${Math.abs(ic.flow_mw)}MW (${ic.flow_pct}%)`"></text>
+                      </g>
+                    </template>
+
+                    <!-- Region nodes: QLD -->
+                    <g transform="translate(80,100)">
+                      <circle r="38" fill="var(--bg-panel)" stroke="var(--border)" stroke-width="2"/>
+                      <text y="-18" text-anchor="middle" font-size="11" font-weight="700" fill="var(--text-primary)">QLD1</text>
+                      <text y="-5" text-anchor="middle" font-size="10"
+                        :fill="(networkData.regions?.QLD1?.price||0)>300 ? 'var(--verdict-insufficient)' : (networkData.regions?.QLD1?.price||0)>100 ? 'var(--verdict-low)' : 'var(--text-accent)'"
+                        :font-weight="selectedRegion==='QLD1'?'700':'400'"
+                        x-text="`$${Math.round(networkData.regions?.QLD1?.price||0)}`"></text>
+                      <text y="9" text-anchor="middle" font-size="9" fill="var(--text-muted)"
+                        x-text="networkData.regions?.QLD1?.regime||'—'"></text>
+                      <text y="20" text-anchor="middle" font-size="9" fill="var(--text-muted)"
+                        x-text="`${Math.round((networkData.regions?.QLD1?.demand||0)/1000)}GW`"></text>
+                    </g>
+
+                    <!-- NSW -->
+                    <g transform="translate(240,100)">
+                      <circle r="38" fill="var(--bg-panel)" stroke="var(--border)" stroke-width="2"/>
+                      <text y="-18" text-anchor="middle" font-size="11" font-weight="700" fill="var(--text-primary)">NSW1</text>
+                      <text y="-5" text-anchor="middle" font-size="10"
+                        :fill="(networkData.regions?.NSW1?.price||0)>300 ? 'var(--verdict-insufficient)' : (networkData.regions?.NSW1?.price||0)>100 ? 'var(--verdict-low)' : 'var(--text-accent)'"
+                        :font-weight="selectedRegion==='NSW1'?'700':'400'"
+                        x-text="`$${Math.round(networkData.regions?.NSW1?.price||0)}`"></text>
+                      <text y="9" text-anchor="middle" font-size="9" fill="var(--text-muted)"
+                        x-text="networkData.regions?.NSW1?.regime||'—'"></text>
+                      <text y="20" text-anchor="middle" font-size="9" fill="var(--text-muted)"
+                        x-text="`${Math.round((networkData.regions?.NSW1?.demand||0)/1000)}GW`"></text>
+                    </g>
+
+                    <!-- VIC -->
+                    <g transform="translate(400,100)">
+                      <circle r="38" fill="var(--bg-panel)" stroke="var(--border)" stroke-width="2"/>
+                      <text y="-18" text-anchor="middle" font-size="11" font-weight="700" fill="var(--text-primary)">VIC1</text>
+                      <text y="-5" text-anchor="middle" font-size="10"
+                        :fill="(networkData.regions?.VIC1?.price||0)>300 ? 'var(--verdict-insufficient)' : (networkData.regions?.VIC1?.price||0)>100 ? 'var(--verdict-low)' : 'var(--text-accent)'"
+                        :font-weight="selectedRegion==='VIC1'?'700':'400'"
+                        x-text="`$${Math.round(networkData.regions?.VIC1?.price||0)}`"></text>
+                      <text y="9" text-anchor="middle" font-size="9" fill="var(--text-muted)"
+                        x-text="networkData.regions?.VIC1?.regime||'—'"></text>
+                      <text y="20" text-anchor="middle" font-size="9" fill="var(--text-muted)"
+                        x-text="`${Math.round((networkData.regions?.VIC1?.demand||0)/1000)}GW`"></text>
+                    </g>
+
+                    <!-- SA -->
+                    <g transform="translate(560,100)">
+                      <circle r="38" fill="var(--bg-panel)" stroke="var(--border)" stroke-width="2"/>
+                      <text y="-18" text-anchor="middle" font-size="11" font-weight="700" fill="var(--text-primary)">SA1</text>
+                      <text y="-5" text-anchor="middle" font-size="10"
+                        :fill="(networkData.regions?.SA1?.price||0)>300 ? 'var(--verdict-insufficient)' : (networkData.regions?.SA1?.price||0)>100 ? 'var(--verdict-low)' : 'var(--text-accent)'"
+                        :font-weight="selectedRegion==='SA1'?'700':'400'"
+                        x-text="`$${Math.round(networkData.regions?.SA1?.price||0)}`"></text>
+                      <text y="9" text-anchor="middle" font-size="9" fill="var(--text-muted)"
+                        x-text="networkData.regions?.SA1?.regime||'—'"></text>
+                      <text y="20" text-anchor="middle" font-size="9" fill="var(--text-muted)"
+                        x-text="`${Math.round((networkData.regions?.SA1?.demand||0)/1000)}GW`"></text>
+                    </g>
+
+                    <!-- TAS -->
+                    <g transform="translate(400,210)">
+                      <circle r="38" fill="var(--bg-panel)" stroke="var(--border)" stroke-width="2"/>
+                      <text y="-18" text-anchor="middle" font-size="11" font-weight="700" fill="var(--text-primary)">TAS1</text>
+                      <text y="-5" text-anchor="middle" font-size="10"
+                        :fill="(networkData.regions?.TAS1?.price||0)>300 ? 'var(--verdict-insufficient)' : (networkData.regions?.TAS1?.price||0)>100 ? 'var(--verdict-low)' : 'var(--text-accent)'"
+                        :font-weight="selectedRegion==='TAS1'?'700':'400'"
+                        x-text="`$${Math.round(networkData.regions?.TAS1?.price||0)}`"></text>
+                      <text y="9" text-anchor="middle" font-size="9" fill="var(--text-muted)"
+                        x-text="networkData.regions?.TAS1?.regime||'—'"></text>
+                      <text y="20" text-anchor="middle" font-size="9" fill="var(--text-muted)"
+                        x-text="`${Math.round((networkData.regions?.TAS1?.demand||0)/1000)}GW`"></text>
+                    </g>
+                  </svg>
+                </div>
+
+                <!-- Region summary table -->
+                <div class="card" style="margin-top:8px;padding:0;overflow:hidden;">
+                  <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                    <thead>
+                      <tr style="background:var(--bg-row-alt);">
+                        <th style="padding:6px 12px;text-align:left;color:var(--text-muted);font-weight:500;">Region</th>
+                        <th style="padding:6px 12px;text-align:right;color:var(--text-muted);font-weight:500;">Price $/MWh</th>
+                        <th style="padding:6px 12px;text-align:right;color:var(--text-muted);font-weight:500;">Demand MW</th>
+                        <th style="padding:6px 12px;text-align:left;color:var(--text-muted);font-weight:500;">Regime</th>
+                        <th style="padding:6px 12px;text-align:right;color:var(--text-muted);font-weight:500;">Headroom</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="[rid, r] in Object.entries(networkData.regions || {})" :key="rid">
+                        <tr style="border-top:1px solid var(--border-subtle);"
+                            :style="rid === selectedRegion ? 'background:var(--bg-row-highlight)' : ''">
+                          <td style="padding:6px 12px;font-weight:600;" x-text="rid"></td>
+                          <td style="padding:6px 12px;text-align:right;font-family:var(--font-mono);"
+                              :style="`color:${r.price>300?'var(--verdict-insufficient)':r.price>100?'var(--verdict-low)':'var(--text-accent)'}`"
+                              x-text="`$${Math.round(r.price||0)}`"></td>
+                          <td style="padding:6px 12px;text-align:right;font-family:var(--font-mono);color:var(--text-secondary);"
+                              x-text="`${Math.round(r.demand||0)}`"></td>
+                          <td style="padding:6px 12px;color:var(--text-muted);" x-text="r.regime||'—'"></td>
+                          <td style="padding:6px 12px;text-align:right;font-family:var(--font-mono);color:var(--text-muted);"
+                              x-text="r.headroom_mw!=null ? `${Math.round(r.headroom_mw)}MW` : '—'"></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+
+                <!-- Valid time -->
+                <div style="margin-top:8px;font-size:10px;color:var(--text-muted);text-align:right;"
+                     x-text="`Network state at ${networkData.valid_time ? new Date(networkData.valid_time).toLocaleTimeString('en-AU') : '—'}`"></div>
               </div>
             </template>
           </div>

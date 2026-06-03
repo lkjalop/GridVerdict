@@ -97,6 +97,10 @@ class QueryResponse(BaseModel):
     pipeline_events: list[dict] | None = None     # decision trace timeline steps
     suggested_questions: list[str] | None = None  # context-aware follow-up chips
     live_forecast: dict | None = None             # full 48-interval ensemble forecast for chart
+    # Dispatch anchor — used by causal chain panel to build the correct time-indexed chain.
+    # This is the interval the answer is ABOUT (historical for archive queries, live for current).
+    dispatch_valid_time: str | None = None        # ISO — may differ from now() for historical queries
+    dispatch_price_rrp: float | None = None       # $/MWh at dispatch_valid_time
 
 
 @router.get("/sessions/{session_id}/progress")
@@ -1250,6 +1254,8 @@ async def submit_query(
         pipeline_events=_events,
         suggested_questions=_suggested or None,
         live_forecast=gather.live_forecast if gather.live_forecast and gather.live_forecast.get("available") else None,
+        dispatch_valid_time=gather.dispatch.valid_time.isoformat() if gather.dispatch else None,
+        dispatch_price_rrp=float(gather.dispatch.price_rrp) if gather.dispatch else None,
     )
 
 

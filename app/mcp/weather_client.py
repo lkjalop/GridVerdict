@@ -51,6 +51,17 @@ REGION_WEATHER_POINTS: dict[str, dict[str, Any]] = {
 }
 
 
+# Monthly mean temperatures (°C) per NEM region — BOM climate averages for each capital city.
+# Used to compute temp_deviation_c (actual - norm) as the demand-driving signal.
+SEASONAL_TEMP_NORMS: dict[str, dict[int, float]] = {
+    "NSW1": {1: 26, 2: 26, 3: 24, 4: 20, 5: 16, 6: 13, 7: 12, 8: 14, 9: 17, 10: 20, 11: 23, 12: 25},
+    "VIC1": {1: 26, 2: 26, 3: 23, 4: 18, 5: 14, 6: 11, 7: 10, 8: 11, 9: 14, 10: 17, 11: 21, 12: 24},
+    "QLD1": {1: 30, 2: 30, 3: 28, 4: 26, 5: 23, 6: 20, 7: 19, 8: 21, 9: 24, 10: 28, 11: 30, 12: 31},
+    "SA1":  {1: 30, 2: 30, 3: 26, 4: 21, 5: 17, 6: 14, 7: 12, 8: 14, 9: 17, 10: 22, 11: 26, 12: 29},
+    "TAS1": {1: 21, 2: 21, 3: 19, 4: 15, 5: 12, 6: 9,  7: 8,  8: 9,  9: 12, 10: 15, 11: 17, 12: 19},
+}
+
+
 @dataclass
 class WeatherReading:
     source: str
