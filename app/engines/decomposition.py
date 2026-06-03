@@ -475,6 +475,20 @@ def _classify_sub_questions(lower: str, requested_output: str) -> list[dict]:
         if {"type": "price_fluctuation"} not in questions:
             questions.append({"type": "price_fluctuation"})
 
+    # Intraday fuel timeline: "why coal now vs wind earlier today?" or
+    # "when did solar drop off?", "what's the solar cliff today?"
+    _wants_fuel_timeline = (
+        _intraday_comparison
+        or any(phrase in lower for phrase in [
+            "coal now", "using coal", "coal instead of", "wind earlier",
+            "solar cliff", "solar drop", "when did solar", "fuel mix today",
+            "renewable today", "wind generation today", "gas took over",
+            "when did gas", "when did coal", "fuel change",
+        ])
+    ) and any(w in lower for w in ["why", "when", "today", "earlier", "now", "instead"])
+    if _wants_fuel_timeline and {"type": "intraday_fuel_timeline"} not in questions:
+        questions.append({"type": "intraday_fuel_timeline"})
+
     # Future date price forecast ("prices on monday june 8th")
     if any(phrase in lower for phrase in ["next week", "june", "july", "august", "monday", "next month"]):
         if any(w in lower for w in ["prices", "price", "what", "expect", "forecast", "buy"]):

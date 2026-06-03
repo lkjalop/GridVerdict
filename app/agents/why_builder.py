@@ -219,6 +219,25 @@ def build_why(sources: WhySources) -> WhyOutput:
         else:
             missing_data.append("weather_consensus")
 
+    # Rooftop solar surprise signal
+    rooftop = getattr(sources, "rooftop_solar", None)
+    if rooftop and rooftop.get("available"):
+        delta = rooftop.get("delta_mw_avg", 0.0)
+        signal = rooftop.get("signal", "neutral")
+        n = rooftop.get("n", 0)
+        if signal == "suppressing":
+            parts.append(
+                f"Rooftop solar generation is running {abs(delta):.0f} MW above AEMO's forecast "
+                f"(based on {n} recent intervals). This excess supply suppresses midday prices — "
+                "generators dispatching at zero fuel cost crowd out coal and gas from the merit order."
+            )
+        elif signal == "supporting":
+            parts.append(
+                f"Rooftop solar is tracking {abs(delta):.0f} MW below AEMO's forecast "
+                f"(based on {n} recent intervals). Less solar than expected means coal and gas "
+                "enter the merit order earlier, supporting higher spot prices."
+            )
+
     if drivers.binding_constraints:
         top = drivers.binding_constraints[0]
         mv = top.get("values", {}).get("marginal_value")

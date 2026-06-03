@@ -145,6 +145,9 @@ class WhySources:
     # Intraday price history: list of {time, price, hour} for today midnight→now-1h
     # Populated when query references "earlier today", "this morning", "pay double" etc.
     intraday_prices: list[dict[str, Any]] = field(default_factory=list)
+    # Rooftop solar surprise signal: {available, delta_mw_avg, signal, n}
+    # delta_mw = actual - forecast; positive = more solar than expected (price suppressing)
+    rooftop_solar: dict[str, Any] | None = None
 
 
 @dataclass
@@ -564,6 +567,8 @@ def assemble_why_sources(
         raw=fcas_raw or None,
     )
 
+    rooftop_solar = getattr(gather, "rooftop_solar", None) or None
+
     return WhySources(
         decomp=decomp,
         current=current,
@@ -576,4 +581,5 @@ def assemble_why_sources(
         technology=technology,
         fcas=fcas,
         source_coverage=gather.source_coverage,
+        rooftop_solar=rooftop_solar,
     )

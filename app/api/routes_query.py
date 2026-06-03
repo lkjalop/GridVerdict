@@ -77,10 +77,10 @@ class _EnrichBundle:
     """Holds all post-gather enrichment results from _enrich_context()."""
     __slots__ = (
         "temporal_evidence", "fuel_mix", "opennem_trend", "opennem_diurnal",
-        "hist_dist", "period_stats", "intraday_prices",
+        "hist_dist", "period_stats", "intraday_prices", "intraday_fuel_timeline",
     )
     def __init__(self, temporal_evidence, fuel_mix, opennem_trend, opennem_diurnal,
-                 hist_dist, period_stats, intraday_prices):
+                 hist_dist, period_stats, intraday_prices, intraday_fuel_timeline=None):
         self.temporal_evidence = temporal_evidence
         self.fuel_mix = fuel_mix
         self.opennem_trend = opennem_trend
@@ -88,6 +88,7 @@ class _EnrichBundle:
         self.hist_dist = hist_dist
         self.period_stats = period_stats
         self.intraday_prices = intraday_prices
+        self.intraday_fuel_timeline = intraday_fuel_timeline
 
 
 async def _enrich_context(
@@ -306,6 +307,19 @@ async def _enrich_context(
         }
     events.append(_ev)
 
+    # Intraday fuel timeline — for "why coal now vs wind earlier today?" queries
+    intraday_fuel_timeline: dict | None = None
+    _wants_fuel_tl = any(
+        sq.get("type") == "intraday_fuel_timeline" for sq in (decomp.sub_questions or [])
+    )
+    if _wants_fuel_tl:
+        try:
+            from app.engines.fuel_mix import get_intraday_fuel_timeline, summarise_intraday_fuel_transition
+            _raw_tl = await get_intraday_fuel_timeline(db, region, hours_back=12)
+            intraday_fuel_timeline = summarise_intraday_fuel_transition(_raw_tl)
+        except Exception as exc:
+            logger.debug("Intraday fuel timeline unavailable (non-fatal): %s", exc)
+
     return _EnrichBundle(
         temporal_evidence=temporal_evidence,
         fuel_mix=fuel_mix,
@@ -314,6 +328,7 @@ async def _enrich_context(
         hist_dist=hist_dist,
         period_stats=period_stats,
         intraday_prices=intraday_prices,
+        intraday_fuel_timeline=intraday_fuel_timeline,
     )
 
 
@@ -982,13 +997,14 @@ async def submit_query(
     _enrich = await _enrich_context(
         gather, decomp, region, db, session_id, _t0, _events, _sg_sources, _query_time,
     )
-    temporal_evidence = _enrich.temporal_evidence
-    fuel_mix          = _enrich.fuel_mix
-    opennem_trend     = _enrich.opennem_trend
-    opennem_diurnal   = _enrich.opennem_diurnal
-    hist_dist         = _enrich.hist_dist
-    period_stats      = _enrich.period_stats
-    intraday_prices   = _enrich.intraday_prices
+    temporal_evidence       = _enrich.temporal_evidence
+    fuel_mix                = _enrich.fuel_mix
+    opennem_trend           = _enrich.opennem_trend
+    opennem_diurnal         = _enrich.opennem_diurnal
+    hist_dist               = _enrich.hist_dist
+    period_stats            = _enrich.period_stats
+    intraday_prices         = _enrich.intraday_prices
+    intraday_fuel_timeline  = _enrich.intraday_fuel_timeline
 
     # --- Security gate 3: tool output hygiene ---
     tool_outputs = await _check_tool_outputs(gather, observer, user, db, query_id, trace_id)
@@ -1068,6 +1084,7 @@ async def submit_query(
                 opennem_trend=opennem_trend,
                 opennem_diurnal=opennem_diurnal,
                 period_stats=period_stats,
+                intraday_fuel_timeline=intraday_fuel_timeline,
             ),
         )
     except Exception as exc:
@@ -1129,6 +1146,7 @@ async def submit_query(
                         fuel_mix=fuel_mix,
                         hist_dist=hist_dist,
                         period_stats=period_stats,
+                        intraday_fuel_timeline=intraday_fuel_timeline,
                     ),
                 )
                 decomp = _patched_decomp

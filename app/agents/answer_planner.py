@@ -64,6 +64,7 @@ def plan_answer(
     opennem_trend: Any | None = None,
     opennem_diurnal: Any | None = None,
     period_stats: dict[str, Any] | None = None,
+    intraday_fuel_timeline: dict[str, Any] | None = None,
 ) -> PlannedAnswer:
     """Build concise visible answer sections from approved evidence."""
     requested = (sources.decomp.requested_output or "").lower()
@@ -133,6 +134,13 @@ def plan_answer(
                 f"vs your threshold of ${t:.0f}/MWh: current ${current:.0f} is "
                 f"{rel} by ${diff:.0f}/MWh."
             )
+
+    # Inject intraday fuel timeline bullets when available — corroborates
+    # "why coal now vs wind earlier today?" claims with actual generation data
+    if intraday_fuel_timeline and intraday_fuel_timeline.get("hours"):
+        for bullet in _build_intraday_fuel_bullets(intraday_fuel_timeline, sources.current.region):
+            plan.key_evidence.append(bullet)
+
     return plan
 
 
@@ -1475,4 +1483,71 @@ def _plan_lookup(sources: WhySources, factual: FactualVerdict) -> PlannedAnswer:
         missing=_missing_lines(factual),
         details=_details(sources, factual),
     )
+
+
+# ── Intraday fuel timeline helper ────────────────────────────────────────────
+
+def _build_intraday_fuel_bullets(timeline: dict, region: str) -> list[str]:
+    """Convert a summarised intraday fuel timeline into 2-4 evidence bullets.
+
+    Used to corroborate "why coal now vs wind/solar earlier today?" claims.
+    Returns empty list when the timeline has no meaningful transition to describe.
+    """
+    bullets: list[str] = []
+    hours = timeline.get("hours") or []
+    if not hours:
+        return bullets
+
+    transition = timeline.get("transition")
+    solar_cliff = timeline.get("solar_cliff_hour")
+    peak_ren_hour = timeline.get("peak_renewable_hour")
+
+    # Peak renewable window
+    if peak_ren_hour:
+        peak = next((h for h in hours if h["hour_iso"] == peak_ren_hour), None)
+        if peak:
+            bullets.append(
+                f"Peak renewable window today ({region}): {peak_ren_hour[:16].replace('T', ' ')} — "
+                f"{peak['renewable_pct']:.0f}% renewable, dominant source: {peak['dominant_fuel']} "
+                f"({peak['dominant_mw']:.0f} MW)."
+            )
+
+    # Solar cliff moment
+    if solar_cliff:
+        bullets.append(
+            f"Solar cliff detected at {solar_cliff[:16].replace('T', ' ')} — "
+            "rooftop and utility solar dropped to below 15% of its midday peak, "
+            "shifting the marginal generator to fossil fuel."
+        )
+
+    # Fuel transition
+    if transition:
+        bullets.append(
+            f"Dispatch transition observed: {transition['from_fuel']} was dominant before "
+            f"{transition['transition_hour'][:16].replace('T', ' ')}, "
+            f"then {transition['to_fuel']} took over as the largest source."
+        )
+
+    # Current vs earlier comparison
+    if hours:
+        latest = hours[-1]
+        earliest = hours[0]
+        if latest["dominant_fuel"] != earliest["dominant_fuel"]:
+            bullets.append(
+                f"Generation mix shift today: {earliest['dominant_fuel']} was leading at "
+                f"{earliest['hour_iso'][:16].replace('T', ' ')} "
+                f"({earliest['dominant_mw']:.0f} MW); "
+                f"{latest['dominant_fuel']} leads now "
+                f"({latest['dominant_mw']:.0f} MW). "
+                "This is the NEM merit order responding to solar/wind availability changes."
+            )
+        else:
+            bullets.append(
+                f"{latest['dominant_fuel'].capitalize()} has been the dominant source throughout "
+                f"the last {len(hours)} hours in {region} "
+                f"({latest['dominant_mw']:.0f} MW avg). Renewable share now: "
+                f"{latest['renewable_pct']:.0f}%."
+            )
+
+    return bullets[:4]  # cap at 4 bullets to keep answers concise
 

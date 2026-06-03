@@ -403,3 +403,152 @@ def _renewable_availability(
         "weather_tags": sorted(tags),
         "notes": notes,
     }
+
+
+# ── Intraday fuel timeline ────────────────────────────────────────────────────
+
+async def get_intraday_fuel_timeline(
+    session: "Any",
+    region: str,
+    hours_back: int = 12,
+) -> list[dict]:
+    """Return the fuel-type generation timeline for the last N hours, bucketed by hour.
+
+    Powers diurnal causal queries: "why coal now vs wind at 2pm?" — this function
+    returns the per-hour fuel mix so the planner can corroborate the user's claim
+    and explain the transition (solar cliff, merit order change, etc.).
+
+    Returns list of {hour_iso, fuel_type, avg_mw, max_mw} sorted by hour asc.
+    Empty list when unit_dispatch_events has no data for this region/window.
+    """
+    if session is None:
+        return []
+    try:
+        from sqlalchemy import text
+        from datetime import datetime, timedelta, timezone
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
+
+        # SQLite uses strftime, PostgreSQL uses date_trunc.
+        # We detect by trying to read the dialect name from the session bind.
+        try:
+            dialect = session.bind.dialect.name if hasattr(session, "bind") and session.bind else "sqlite"
+        except Exception:
+            dialect = "sqlite"
+
+        if dialect == "postgresql":
+            sql = text("""
+                SELECT
+                    TO_CHAR(DATE_TRUNC('hour', valid_time), 'YYYY-MM-DD"T"HH24:00:00') AS hour_iso,
+                    fuel_type,
+                    ROUND(AVG(total_cleared_mw)::numeric, 1) AS avg_mw,
+                    ROUND(MAX(total_cleared_mw)::numeric, 1) AS max_mw
+                FROM unit_dispatch_events
+                WHERE region = :region
+                  AND valid_time >= :cutoff
+                  AND fuel_type IS NOT NULL
+                  AND fuel_type != 'unknown'
+                GROUP BY 1, 2
+                ORDER BY 1 ASC, avg_mw DESC
+            """)
+        else:
+            sql = text("""
+                SELECT
+                    strftime('%Y-%m-%dT%H:00:00', valid_time) AS hour_iso,
+                    fuel_type,
+                    ROUND(AVG(total_cleared_mw), 1) AS avg_mw,
+                    ROUND(MAX(total_cleared_mw), 1) AS max_mw
+                FROM unit_dispatch_events
+                WHERE region = :region
+                  AND valid_time >= :cutoff
+                  AND fuel_type IS NOT NULL
+                  AND fuel_type != 'unknown'
+                GROUP BY 1, 2
+                ORDER BY 1 ASC, avg_mw DESC
+            """)
+
+        result = await session.execute(sql, {"region": region, "cutoff": cutoff})
+        rows = result.fetchall()
+
+        timeline = []
+        for hour_iso, raw_fuel, avg_mw, max_mw in rows:
+            label = _fuel_group(raw_fuel)
+            timeline.append({
+                "hour_iso": hour_iso,
+                "fuel_type": label,
+                "avg_mw": float(avg_mw or 0),
+                "max_mw": float(max_mw or 0),
+            })
+        return timeline
+    except Exception as exc:
+        logger.debug("Intraday fuel timeline failed for %s: %s", region, exc)
+        return []
+
+
+def summarise_intraday_fuel_transition(timeline: list[dict]) -> dict:
+    """Derive the dominant fuel per hour and detect the solar-cliff transition.
+
+    Returns:
+      hours         — list of {hour_iso, dominant_fuel, dominant_mw, renewable_pct}
+      transition    — {from_fuel, to_fuel, transition_hour} when a major shift occurred
+      solar_cliff_hour — ISO hour string when solar dropped to <10% of its peak
+      peak_renewable_hour — ISO hour when wind+solar share was highest
+    """
+    if not timeline:
+        return {"hours": [], "transition": None, "solar_cliff_hour": None, "peak_renewable_hour": None}
+
+    # Group by hour
+    by_hour: dict[str, dict[str, float]] = {}
+    for row in timeline:
+        h = row["hour_iso"]
+        if h not in by_hour:
+            by_hour[h] = {}
+        by_hour[h][row["fuel_type"]] = by_hour[h].get(row["fuel_type"], 0) + row["avg_mw"]
+
+    _RENEWABLES = {"wind", "solar", "hydro"}
+    hours_list = []
+    for h in sorted(by_hour):
+        fuel_mw = by_hour[h]
+        total = sum(fuel_mw.values()) or 1
+        dominant = max(fuel_mw, key=fuel_mw.get)
+        renewable_mw = sum(mw for f, mw in fuel_mw.items() if f in _RENEWABLES)
+        hours_list.append({
+            "hour_iso": h,
+            "dominant_fuel": dominant,
+            "dominant_mw": round(fuel_mw[dominant], 1),
+            "renewable_pct": round(renewable_mw / total * 100, 1),
+            "fuel_breakdown": {f: round(mw, 1) for f, mw in sorted(fuel_mw.items())},
+        })
+
+    # Solar cliff: hour when solar dropped to <15% of its peak solar share
+    solar_shares = {h["hour_iso"]: by_hour[h["hour_iso"]].get("solar", 0) for h in hours_list}
+    peak_solar = max(solar_shares.values(), default=0)
+    solar_cliff_hour = None
+    if peak_solar > 50:  # only meaningful when solar was significant
+        for h in hours_list:
+            share = solar_shares.get(h["hour_iso"], 0)
+            if share < peak_solar * 0.15:
+                solar_cliff_hour = h["hour_iso"]
+                break
+
+    # Peak renewable hour
+    peak_ren = max(hours_list, key=lambda h: h["renewable_pct"], default=None)
+    peak_renewable_hour = peak_ren["hour_iso"] if peak_ren else None
+
+    # Dominant fuel transition (first hour where dominant fuel changes)
+    transition = None
+    for i in range(1, len(hours_list)):
+        prev_fuel = hours_list[i - 1]["dominant_fuel"]
+        curr_fuel = hours_list[i]["dominant_fuel"]
+        if curr_fuel != prev_fuel:
+            transition = {
+                "from_fuel": prev_fuel,
+                "to_fuel": curr_fuel,
+                "transition_hour": hours_list[i]["hour_iso"],
+            }
+
+    return {
+        "hours": hours_list,
+        "transition": transition,
+        "solar_cliff_hour": solar_cliff_hour,
+        "peak_renewable_hour": peak_renewable_hour,
+    }
