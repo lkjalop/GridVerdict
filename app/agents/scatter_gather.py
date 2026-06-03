@@ -47,6 +47,7 @@ class GatherResult:
     news_items: list[dict[str, Any]] = field(default_factory=list)
     weather: dict[str, Any] | None = None
     fcas: dict[str, Any] | None = None             # FcasOpportunityContext.to_dict()
+    rooftop_solar: dict[str, Any] | None = None   # solar surprise signal: {delta_mw_avg, signal, n}
     driver_events: list[dict[str, Any]] = field(default_factory=list)
     unit_events: list[dict[str, Any]] = field(default_factory=list)
     recent_dispatch: list[dict[str, Any]] = field(default_factory=list)
@@ -155,6 +156,7 @@ async def scatter_gather(
         ("FCAS_PRICES",            _task_fcas(region, dispatch_for_analogs)),
         ("UNIT_DISPATCH",          _task_unit_dispatch(region, dispatch_for_analogs)),
         ("MARKET_DRIVERS",         _task_driver_events(region, dispatch_for_analogs)),
+        ("ROOFTOP_SOLAR",          _task_rooftop_solar(region, dispatch_for_analogs)),
     ]
     if include_weather:
         _ptasks.append(("WEATHER_CONSENSUS", _task_weather(region, cache)))
@@ -185,13 +187,14 @@ async def scatter_gather(
     fcas_result          = _pdata[5] if isinstance(_pdata[5], dict) else None
     unit_events_result   = _pdata[6] if isinstance(_pdata[6], list) else []
     driver_events_result = _pdata[7] if isinstance(_pdata[7], list) else []
-    _weather_idx = 8
+    rooftop_result       = _pdata[8] if isinstance(_pdata[8], dict) else None
+    _weather_idx = 9
     weather_result = (
         _pdata[_weather_idx]
         if include_weather and len(_pdata) > _weather_idx and isinstance(_pdata[_weather_idx], dict)
         else None
     )
-    _commentary_idx = 8 + (1 if include_weather else 0)
+    _commentary_idx = 9 + (1 if include_weather else 0)
     commentary_result: list[dict[str, Any]] = (
         _pdata[_commentary_idx]
         if include_commentary and len(_pdata) > _commentary_idx and isinstance(_pdata[_commentary_idx], list)
@@ -258,11 +261,12 @@ async def scatter_gather(
         news_items=news_items_result,
         weather=weather_result,
         fcas=fcas_result,
+        rooftop_solar=rooftop_result,
         unit_events=unit_events_result,
         driver_events=driver_events_result,
         commentary_context=commentary_result,
         tasks_ok=tasks_ok,
-        tasks_total=9 + (1 if include_weather else 0) + (1 if include_commentary else 0),
+        tasks_total=10 + (1 if include_weather else 0) + (1 if include_commentary else 0),
         elapsed_ms=elapsed,
         notices_stale=notices_stale,
         news_stale=news_stale,
@@ -507,6 +511,49 @@ async def _task_fcas(
         return ctx.to_dict()
     except Exception as exc:
         logger.debug("T8 FCAS task failed for %s: %s", region, exc)
+        return None
+
+
+async def _task_rooftop_solar(
+    region: str,
+    dispatch: "DispatchPrice | None",
+) -> dict[str, Any] | None:
+    """Fetch recent rooftop solar actual-vs-forecast delta from DB.
+
+    Returns a signal dict:
+      available  — True when recent data exists
+      delta_mw_avg — average (actual - forecast) over last 12 intervals
+      signal     — 'suppressing' (more solar than expected, price down)
+                   'supporting'  (less solar than expected, price up)
+                   'neutral'
+      n          — number of intervals used
+    """
+    if dispatch is None:
+        return None
+    try:
+        from app.db.session import db_session
+        from sqlalchemy import text as _text
+        cutoff = dispatch.valid_time
+        since = cutoff.replace(tzinfo=None) if cutoff.tzinfo else cutoff
+        async with db_session() as session:
+            result = await session.execute(_text("""
+                SELECT delta_mw FROM rooftop_solar_intervals
+                WHERE region = :region
+                  AND interval_datetime >= :since - INTERVAL '1 hour'
+                  AND interval_datetime <= :since
+                  AND delta_mw IS NOT NULL
+                ORDER BY interval_datetime DESC
+                LIMIT 12
+            """), {"region": region, "since": since})
+            rows = result.fetchall()
+        if not rows:
+            return None
+        deltas = [float(r[0]) for r in rows]
+        avg = sum(deltas) / len(deltas)
+        signal = "suppressing" if avg > 50 else "supporting" if avg < -50 else "neutral"
+        return {"available": True, "delta_mw_avg": round(avg, 1), "signal": signal, "n": len(deltas)}
+    except Exception as exc:
+        logger.debug("Rooftop solar task failed for %s: %s", region, exc)
         return None
 
 

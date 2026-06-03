@@ -226,7 +226,7 @@ def _plan_multi_part(
                         f"Tight FCAS markets: {', '.join(fcas.tight_markets)} (RRP ≥ $50/MWh)."
                     )
             else:
-                sections_missing.append("FCAS prices (not yet populated in DB)")
+                sections_missing.append("FCAS prices: no data for this interval")
 
         elif sq_type == "interconnector_causality":    # E3: interconnector sub-question
             ic = getattr(sources, "drivers", None)
@@ -901,7 +901,7 @@ def _plan_diurnal_analysis(
         if sources.weather.available:
             key_evidence.append(_weather_line(sources))
 
-        missing = ["AEMO DISPATCHLOAD by fuel — would show coal/gas/wind MW per hour (not yet ingested)"]
+        missing = ["Per-fuel hourly breakdown: DISPATCHLOAD ingested but hourly aggregation not computed for this query"]
 
         return PlannedAnswer(
             headline=f"{region} diurnal price cycle — real data, last {_onem.days_sampled} days",
@@ -1105,7 +1105,7 @@ def _plan_trend_analysis(
         ],
         missing=[
             "Monthly P50 time series (requires OpenNEM API — monthly generation + price by fuel)",
-            "By-fuel price contribution over time (DISPATCHLOAD aggregated monthly — not yet ingested)",
+            "By-fuel price contribution over time (monthly per-fuel aggregation not computed)",
             f"Calendar year {period_label} average if requesting a specific year",
         ],
         details=_details(sources, factual, hist_dist=hist_dist),

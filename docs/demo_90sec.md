@@ -66,17 +66,21 @@ Then click the **Data Provenance** panel:
 
 ---
 
-## Scene 4 — Historical analogs (1:10–1:25)
+## Scene 4 — FCAS dashboard / NEM schematic (1:10–1:25)
 
-*[optional, use if time permits — can cut to 90s without this]*
+*[optional, use if time permits — pick one or both]*
 
-Type:
+Click the **FCAS** tab in the viewport:
+> "FCAS ancillary service prices — all 8 services, colour-coded raise/lower. Threshold lines at $50 and $200/MWh. Elevated FCAS means frequency stress — often precedes price spikes."
+
+Or click **NEM Network**:
+> "Circuit-diagram view of the NEM — current price, demand, and headroom per region. Interconnector arrows show live flow direction and % of transfer limit. SA to VIC through Heywood."
+
+Or type:
 ```
 Have we seen NSW conditions like this before?
 ```
-
-Say:
-> "HippoGraph — a graph-based analog retriever — finds the 10 closest historical market states by price, demand, headroom, and regime. It reports what happened in each case."
+> "HippoGraph finds the 10 closest historical market states by price, demand, headroom, and regime. It reports what happened next in each case."
 
 ---
 
