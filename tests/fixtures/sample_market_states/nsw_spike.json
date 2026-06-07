@@ -1,0 +1,15 @@
+{
+  "region": "NSW1",
+  "price_rrp": 347.50,
+  "demand_mw": 8420.0,
+  "availability_mw": 8850.0,
+  "headroom_mw": 430.0,
+  "regime": "spike",
+  "price_percentile": 0.91,
+  "valid_time": "2026-05-23T04:30:00+00:00",
+  "system_time": "2026-05-23T04:30:05+00:00",
+  "source": "AEMO_DISPATCH_PRICE",
+  "is_stale": false,
+  "staleness_seconds": 45,
+  "active_notices": []
+}

@@ -1,14 +1,17 @@
 """Coverage auditor — checks whether the planned answer covers what was asked.
 
 Distinct from ClaimVerifier (which asks "is this claim true?").
-This asks "did we answer the sub-questions?" — a routing/coverage check, not a truth check.
+This asks "did we answer the sub-questions?" — a routing/coverage check.
+
+Priority order:
+  1. Deterministic rule-based check (always runs, <1ms, no network)
+  2. Ollama LLM with thinking mode (optional enhancement, 4–8s)
+
+The deterministic check maps sub-question types → expected answer section titles.
+If a sub-question has no matching section, it suggests a routing fix.
 
 Called after answer planning, only when confidence < 0.6 AND answer_gap_risk=True.
-Uses qwen3:14b WITH thinking mode enabled (~4-8s).
 Always falls back to AuditResult(passes=True) on any failure — never blocks.
-
-If a routing gap is found, routes_query.py re-plans ONCE with the suggested_output.
-No loop: one re-plan attempt, then return whatever we have.
 """
 from __future__ import annotations
 
@@ -34,12 +37,10 @@ You receive:
 2. The answer sections the system produced
 3. The routing label the system used
 
-Your job: assess whether the answer addresses each sub-question.
-
 Return JSON:
 {
   "passes": true or false,
-  "gaps": ["describe each unaddressed sub-question and why"],
+  "gaps": ["describe each unaddressed sub-question"],
   "suggested_output": null or one of [
     "price_fluctuation_attribution",
     "fuel_source_recommendation",
@@ -68,6 +69,36 @@ _VALID_OUTPUTS = {
     "current_market_state",
 }
 
+# Sub-question type → required answer section keyword(s) (any match = covered)
+_SQ_COVERAGE_MAP: dict[str, list[str]] = {
+    "current_price_reason":           ["answer", "evidence", "drivers", "why"],
+    "fuel_source_comparison":         ["fuel", "source", "coal", "gas", "solar", "wind", "hydro"],
+    "historical_price_distribution":  ["historical", "median", "p50", "p90", "last year", "percentile", "archive"],
+    "forecast_outlook":               ["forecast", "continuation", "p10", "p50", "p90", "will"],
+    "regime_change":                  ["analog", "historical", "changed", "regime"],
+    "price_fluctuation":              ["answer", "evidence", "fluctuat", "movement", "path"],
+    "regional_comparison":            ["comparison", "region", "state", "spread", "all nem"],
+    "intraday_price_cycle":           ["answer", "morning", "evening", "solar", "diurnal", "earlier"],
+    "intraday_fuel_timeline":         ["fuel", "solar cliff", "coal", "wind", "transition", "today"],
+    "specific_period_stats":          ["average", "mean", "median", "period", "archive", "interval"],
+    "diurnal_pattern":                ["diurnal", "time of day", "pattern", "peak", "morning", "evening"],
+    "trend_analysis":                 ["trend", "monthly", "annual", "year over year", "yoy"],
+    "fcas_opportunity":               ["fcas", "ancillary", "raise", "lower", "contingency"],
+    "interconnector_causality":       ["interconnector", "flow", "qni", "heywood", "basslink"],
+}
+
+# Sub-question type → suggested routing fix when coverage gap detected
+_SQ_ROUTING_FIX: dict[str, str] = {
+    "fuel_source_comparison":        "fuel_source_recommendation",
+    "price_fluctuation":             "price_fluctuation_attribution",
+    "regional_comparison":           "regional_comparison",
+    "historical_price_distribution": "causal_explanation",
+    "forecast_outlook":              "causal_explanation_with_forecast",
+    "regime_change":                 "historical_analog_outcome",
+    "intraday_price_cycle":          "fuel_source_recommendation",
+    "intraday_fuel_timeline":        "fuel_source_recommendation",
+}
+
 
 @dataclass
 class AuditResult:
@@ -87,21 +118,94 @@ class AuditResult:
 _PASSING = AuditResult(passes=True)
 
 
+def _deterministic_audit(
+    sub_questions: list[str],
+    answer_sections: list[dict[str, Any]],
+    current_requested_output: str,
+) -> AuditResult:
+    """Fast deterministic coverage check.
+
+    Checks each sub-question type against answer section titles and items.
+    Returns AuditResult immediately — no network call.
+    """
+    if not sub_questions:
+        return _PASSING
+
+    # Flatten all answer text for keyword scanning
+    all_text = " ".join(
+        (s.get("title", "") + " " + " ".join(s.get("items") or []))
+        for s in answer_sections
+    ).lower()
+
+    gaps: list[str] = []
+    suggested: str | None = None
+
+    for sq in sub_questions:
+        sq_type = sq if isinstance(sq, str) else str(sq)
+        # Normalise: handle both plain strings and dict types
+        if sq_type.startswith("{") and "type" in sq_type:
+            try:
+                sq_type = json.loads(sq_type.replace("'", '"')).get("type", sq_type)
+            except Exception:
+                pass
+
+        keywords = _SQ_COVERAGE_MAP.get(sq_type)
+        if keywords is None:
+            continue  # unknown sub-question type — skip
+
+        covered = any(kw in all_text for kw in keywords)
+        if not covered:
+            gaps.append(f"Sub-question '{sq_type}' has no matching evidence in answer sections")
+            # Take the routing fix for the first uncovered sub-question
+            if suggested is None:
+                candidate = _SQ_ROUTING_FIX.get(sq_type)
+                if candidate and candidate != current_requested_output and candidate in _VALID_OUTPUTS:
+                    suggested = candidate
+
+    if not gaps:
+        return _PASSING
+
+    return AuditResult(
+        passes=False,
+        gaps=gaps[:3],
+        suggested_output=suggested,
+        reasoning=f"Deterministic check: {len(gaps)} sub-question(s) unaddressed in answer sections.",
+    )
+
 
 async def audit_coverage(
     sub_questions: list[str],
     answer_sections: list[dict[str, Any]],
     current_requested_output: str,
 ) -> AuditResult:
-    """Run adversarial critique with thinking mode ON.
+    """Coverage audit — deterministic first, Ollama enhancement optional.
 
-    Returns AuditResult. Falls back to _PASSING on any failure.
+    Always runs the fast deterministic check first.
+    If deterministic finds gaps, returns immediately (no Ollama call needed).
+    If deterministic passes AND Ollama is available, runs LLM for deeper analysis.
+    Falls back to _PASSING on any failure — never blocks the pipeline.
     """
-    if not sub_questions or _settings.decomposer_backend == "rule_based":
+    if not sub_questions:
         return _PASSING
 
-    model = _settings.ollama_model
+    # ── Step 1: deterministic check (always, <1ms) ────────────────────────────
+    det_result = _deterministic_audit(sub_questions, answer_sections, current_requested_output)
+    if not det_result.passes and det_result.has_actionable_suggestion():
+        logger.debug(
+            "Coverage auditor (deterministic): gaps=%s, re-routing to %s",
+            det_result.gaps, det_result.suggested_output,
+        )
+        return det_result
 
+    # ── Step 2: Ollama enhancement (optional, only when deterministic passes) ──
+    # Skip if: rule_based mode, no gaps found by deterministic (save latency),
+    # or this is a simple single sub-question query.
+    if _settings.decomposer_backend == "rule_based":
+        return det_result
+    if det_result.passes and len(sub_questions) <= 1:
+        return _PASSING  # single sub-question, deterministic says OK — skip LLM
+
+    model = _settings.ollama_model
     all_items = [item for sec in answer_sections for item in (sec.get("items") or [])]
     answer_text = "\n".join(f"- {item}" for item in all_items[:12]) or "(no answer items)"
     section_titles = [s.get("title", "") for s in answer_sections]
@@ -111,10 +215,9 @@ async def audit_coverage(
         + "\n".join(f"{i + 1}. {q}" for i, q in enumerate(sub_questions))
         + f"\n\nAnswer produced (sections: {section_titles}):\n{answer_text}"
         + f"\n\nCurrent routing label: {current_requested_output}"
-        + "\n\nDoes this answer address each sub-question?"
+        + "\n\nDoes this answer address each sub-question? /no_think"
     )
 
-    # Thinking mode ON — no /no_think prefix. qwen3 will reason before answering.
     payload: dict = {
         "model": model,
         "messages": [
@@ -122,27 +225,23 @@ async def audit_coverage(
             {"role": "user", "content": user_content},
         ],
         "stream": False,
-        "options": {"temperature": 0.0, "num_predict": 600, "num_ctx": 3072},
+        "options": {"temperature": 0.0, "num_predict": 400, "num_ctx": 2048},
     }
 
     try:
         async with httpx.AsyncClient(
             base_url=_settings.ollama_base_url,
-            timeout=httpx.Timeout(12.0),
+            timeout=httpx.Timeout(5.0),   # 5s max — fast fail, not 12s
         ) as client:
             resp = await client.post("/api/chat", json=payload)
             resp.raise_for_status()
             raw = resp.json()["message"]["content"]
 
-        # Strip think/reasoning block — keep only the JSON answer
         clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         clean = re.sub(r"```(?:json)?", "", clean).strip()
-
-        # Find first JSON object in the cleaned output
         match = re.search(r"\{.*\}", clean, re.DOTALL)
         if not match:
-            logger.debug("Adversarial critic: no JSON object in output")
-            return _PASSING
+            return det_result  # fall back to deterministic
         data: dict = json.loads(match.group())
 
         suggested = data.get("suggested_output") or None
@@ -157,12 +256,11 @@ async def audit_coverage(
         )
         if not result.passes:
             logger.debug(
-                "Adversarial critic FAIL — gaps: %s, suggesting: %s",
-                result.gaps,
-                result.suggested_output,
+                "Coverage auditor (LLM): gaps=%s, suggesting=%s",
+                result.gaps, result.suggested_output,
             )
         return result
 
     except Exception as exc:
-        logger.debug("Adversarial critic failed (non-fatal, passing): %s", exc)
-        return _PASSING
+        logger.debug("Coverage auditor LLM failed (using deterministic result): %s", exc)
+        return det_result  # fall back to deterministic result, not blind _PASSING

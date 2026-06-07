@@ -287,16 +287,25 @@ async def handle_investment_price_context(
 
 # ── B3: Geographic redirect (WA, NT, NZ) ─────────────────────────────────────
 
-def handle_geographic_redirect(
+async def handle_geographic_redirect(
     decomp: Any,
     region: str = "NSW1",
     db: Any | None = None,
 ) -> dict[str, Any]:
-    """Explain non-NEM market structure and offer the nearest NEM equivalent."""
+    """Explain non-NEM market structure and offer the nearest NEM equivalent.
+
+    For WA queries: uses wa_client.py to fetch structured WEM comparison data
+    (fuel mix, indicative price context, structural differences table).
+    Falls back to embedded static facts on any error.
+    """
     adjacent = decomp.adjacent_context or {}
     geo = decomp.geographic_market or "UNKNOWN"
 
-    # Market structure explanation by geography
+    # ── WA: use wa_client for richer structured comparison ────────────────────
+    if geo == "WA_WEM":
+        return await _handle_wa_comparison(decomp, region, adjacent)
+
+    # Market structure explanation by geography (NT, NZ, unknown)
     market_explanations = {
         "WA_WEM": {
             "title": "Western Australia — Wholesale Electricity Market (WEM)",
@@ -792,6 +801,110 @@ def handle_generic_evidence_bridge(decomp: Any, region: str = "NSW1") -> dict[st
             f"{adjacent.get('bridge_mechanism', 'See the scope boundary above for what else is needed.')}"
         ),
         "missing_data": [adjacent.get("unanswerable_sub", "External data source")],
+        "adjacent_context": adjacent,
+    }
+
+
+async def _handle_wa_comparison(
+    decomp: Any,
+    region: str,
+    adjacent: dict[str, Any],
+) -> dict[str, Any]:
+    """WA NEM-vs-WEM comparison using wa_client structured data.
+
+    Provides: fuel mix, indicative price context, structural differences table,
+    NEM analog reasoning, and NLP-ready answer bullets.
+    """
+    comparison = None
+    try:
+        from app.data.wa_client import get_wem_comparison, format_comparison_for_nlp
+        comparison = await get_wem_comparison(nem_region="SA1")
+        bullets = format_comparison_for_nlp(comparison, nem_region="SA1")
+    except Exception as exc:
+        logger.debug("WA comparison client failed (using static fallback): %s", exc)
+        bullets = [
+            "WEM (WA): Capacity Market + Energy Balancing Market. NEM: energy-only spot market.",
+            "WEM fuel mix: ~59% gas, ~14% coal, ~23% renewable. NEM: ~40% renewable (varies by region).",
+            "WEM balancing price cap: ~$500/MWh vs NEM VoLL: $15,500/MWh.",
+            "WEM dispatch interval: 30 min. NEM: 5 min (more volatile).",
+            "WEM has no interconnection to NEM. SA1 is isolated by a single line — the closest NEM analog.",
+        ]
+        comparison = None
+
+    # Structural differences table — always available
+    diff_bullets = []
+    if comparison:
+        for diff in comparison.structural_differences[:5]:
+            diff_bullets.append(
+                f"{diff['dimension']}: "
+                f"WEM = {diff['wem'][:100]}  |  "
+                f"NEM ({region}) = {diff['nem'][:100]}"
+            )
+    else:
+        diff_bullets = [
+            "Market design: WEM = capacity market (availability payments). NEM = energy-only (dispatch payments).",
+            "Dispatch: WEM = 30-min settlement. NEM = 5-min dispatch since 2021.",
+            "Interconnection: WEM = isolated SWIS. NEM = 5-region interconnected grid.",
+            "Gas role: WEM = ~59% gas (dominant). NEM = ~15% gas (peaker-only).",
+            "Price cap: WEM = ~$500/MWh. NEM = $15,500/MWh (VoLL) — 30x more volatile.",
+        ]
+
+    analog_reasoning = comparison.nem_analog_reasoning if comparison else (
+        "SA1 (South Australia) is the closest NEM analog: both are isolated systems with high renewable "
+        "penetration backed by gas peakers. SA's 2019-2022 solar cannibalisation trajectory previews "
+        "where WEM is heading toward its 80% renewable target by 2030."
+    )
+    analog_learnings = comparison.nem_analog_learnings if comparison else [
+        "SA midday prices collapsed to near-zero once solar exceeded 50% of demand.",
+        "Evening gas peaks in SA reach $150-300/MWh during winter demand peaks.",
+        "Hornsdale BESS (SA) earns strong FCAS + arbitrage revenue — same opportunity exists in WEM.",
+    ]
+
+    sections = [
+        _make_section("WEM vs NEM — structural comparison", bullets),
+        _make_section("Key design differences by dimension", diff_bullets),
+        _make_section("Closest NEM analog: SA1 (South Australia)", [
+            analog_reasoning,
+        ]),
+        _make_section("What SA1's experience tells us about WEM's future", analog_learnings),
+        _make_section("Queryable NEM questions that inform WA decisions", [
+            "Ask: 'What is the current SA spot price?' — SA is the closest live analog",
+            "Ask: 'Why is SA price elevated right now?' — gas peaker dependency (same as WEM)",
+            "Ask: 'What is the evening peak price pattern in SA?' — WEM will follow similar curve",
+            "Ask: 'How does SA renewable penetration compare to NSW?' — SA shows WEM's future trajectory",
+        ]),
+        _scope_boundary_section(
+            answerable="WEM market structure, fuel mix, indicative price context, NEM analog analysis",
+            unanswerable="Live WEM balancing prices, WEM market notices, WEM FCAS (requires AEMO WEM API)",
+            redirect="AEMO WEM: aemo.com.au/energy-systems/electricity/wholesale-electricity-market-wem",
+        ),
+    ]
+
+    data_note = (
+        f"Source: {comparison.source} (freshness: {comparison.data_freshness})"
+        if comparison else "Source: embedded structural data from AEMO WEM 2024 publications"
+    )
+
+    return {
+        "sections": sections,
+        "why_plain_english": (
+            "Your question is about the WEM (Western Australia's Wholesale Electricity Market), "
+            "which is not part of the NEM. GridVerdict provides a rigorous structural comparison: "
+            "WEM is a capacity market (generators paid for availability) vs the NEM's energy-only spot market. "
+            "WEM runs on 30-min dispatch intervals vs NEM's 5-min. WEM is ~59% gas vs NEM's ~15%. "
+            "The closest NEM analog is SA1 — high renewables, isolated system, gas peaker backup. "
+            "SA's experience since 2019 is a leading indicator for where WEM is heading. "
+            f"{data_note}."
+        ),
+        "missing_data": [
+            "Live WEM balancing price (requires AEMO WEM API — separate from NEM NEMWeb access)",
+            "WEM FCAS prices and market notices (available through WEM API)",
+        ],
+        "upgrade_path": [
+            "Ask: 'What is the current SA spot price?' — best live NEM proxy for WEM dynamics",
+            "Ask: 'Why is SA price elevated right now?' — identical supply-stack logic to WEM",
+            "For live WEM data: register at AEMO WEM portal (aemo.com.au)",
+        ],
         "adjacent_context": adjacent,
     }
 

@@ -1,0 +1,25 @@
+{
+  "verdict": "SUPPORTED",
+  "action": "dispatch_now",
+  "confidence": 0.84,
+  "confidence_band": "high",
+  "as_of": "2026-05-23T04:30:00+00:00",
+  "why_plain_english": "NSW1 dispatch price is $347.50/MWh, in a price spike event. Total demand is 8420 MW against 8850 MW available generation, leaving 430 MW of headroom.",
+  "evidence_refs": [
+    {
+      "id": "ev-a1b2c3d4",
+      "source": "AEMO_DISPATCH_PRICE",
+      "region": "NSW1",
+      "interval": "2026-05-23T04:30:00+00:00",
+      "field": "price_rrp",
+      "value": 347.50,
+      "raw_ref": "abc123def456"
+    }
+  ],
+  "historical_analogs": null,
+  "news_correlation": null,
+  "counterargument": "Price may ease quickly if constraint resolves.",
+  "missing_data": [],
+  "disclaimer": "Simulation and decision-support only. Not financial advice. Not a market participant. Uses public AEMO/NEMWEB data.",
+  "trace_id": "trace-abc123def456"
+}

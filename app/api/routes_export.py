@@ -182,11 +182,19 @@ async def odata_fcas_prices(
 
 @router.get("/odata/$metadata", include_in_schema=False)
 async def odata_metadata():
-    """Minimal EDMX metadata document — required for PowerBI to parse the schema."""
+    """Full OData v4 EDMX metadata document — required for PowerBI/Tableau to parse schema.
+
+    Entity sets:
+      market_events  — 5-min dispatch prices (price, demand, availability, headroom)
+      fcas_prices    — all 8 FCAS ancillary service prices per interval
+      queries        — NLP query history (raw_query, intent, verdict, region, answer)
+      traces         — bitemporal decision traces (valid_time vs system_time)
+    """
     edmx = """<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
     <Schema Namespace="GridVerdict" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
       <EntityType Name="MarketEvent">
         <Key><PropertyRef Name="valid_time"/><PropertyRef Name="region"/></Key>
         <Property Name="valid_time"      Type="Edm.DateTimeOffset" Nullable="false"/>
@@ -198,6 +206,7 @@ async def odata_metadata():
         <Property Name="source"          Type="Edm.String"/>
         <Property Name="raw_ref"         Type="Edm.String"/>
       </EntityType>
+
       <EntityType Name="FcasPrice">
         <Key><PropertyRef Name="valid_time"/><PropertyRef Name="region"/></Key>
         <Property Name="valid_time"      Type="Edm.DateTimeOffset" Nullable="false"/>
@@ -211,14 +220,159 @@ async def odata_metadata():
         <Property Name="lower_5min_rrp"  Type="Edm.Double"/>
         <Property Name="lower_reg_rrp"   Type="Edm.Double"/>
       </EntityType>
+
+      <EntityType Name="Query">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id"           Type="Edm.String"          Nullable="false"/>
+        <Property Name="tenant_id"    Type="Edm.String"/>
+        <Property Name="session_id"   Type="Edm.String"/>
+        <Property Name="raw_query"    Type="Edm.String"/>
+        <Property Name="intent"       Type="Edm.String"/>
+        <Property Name="verdict"      Type="Edm.String"/>
+        <Property Name="region"       Type="Edm.String"/>
+        <Property Name="trace_id"     Type="Edm.String"/>
+        <Property Name="created_at"   Type="Edm.DateTimeOffset"/>
+      </EntityType>
+
+      <EntityType Name="Trace">
+        <Key><PropertyRef Name="id"/></Key>
+        <Property Name="id"             Type="Edm.String"        Nullable="false"/>
+        <Property Name="tenant_id"      Type="Edm.String"/>
+        <Property Name="query_id"       Type="Edm.String"/>
+        <Property Name="valid_time"     Type="Edm.DateTimeOffset"/>
+        <Property Name="system_time"    Type="Edm.DateTimeOffset"/>
+        <Property Name="model_profile"  Type="Edm.String"/>
+        <Property Name="created_at"     Type="Edm.DateTimeOffset"/>
+      </EntityType>
+
       <EntityContainer Name="GridVerdictService">
         <EntitySet Name="market_events" EntityType="GridVerdict.MarketEvent"/>
         <EntitySet Name="fcas_prices"   EntityType="GridVerdict.FcasPrice"/>
+        <EntitySet Name="queries"       EntityType="GridVerdict.Query"/>
+        <EntitySet Name="traces"        EntityType="GridVerdict.Trace"/>
       </EntityContainer>
+
     </Schema>
   </edmx:DataServices>
 </edmx:Edmx>"""
     return Response(content=edmx, media_type="application/xml")
+
+
+# ── OData — queries ──────────────────────────────────────────────────
+# Enables Power BI / Tableau to load full NLP query history + verdicts.
+
+@router.get("/odata/queries")
+async def odata_queries(
+    intent: str | None = Query(default=None, description="Filter by intent (e.g. explanation)"),
+    verdict: str | None = Query(default=None, description="Filter by verdict (e.g. SUPPORTED)"),
+    region: str | None = Query(default=None),
+    start: str | None = Query(default=None, description="ISO start date"),
+    end: str | None = Query(default=None),
+    top: int = Query(default=_PAGE_SIZE, ge=1, le=5000, alias="$top"),
+    skip: int = Query(default=0, ge=0, alias="$skip"),
+):
+    """OData v4 NLP query history — connect to Power BI for query analytics."""
+    try:
+        from sqlalchemy import select, desc
+        from app.db.session import db_session
+        from app.db.models import Query as QueryModel
+
+        start_dt = _parse_dt(start) or (datetime.now(timezone.utc) - timedelta(days=90))
+        end_dt   = _parse_dt(end)   or datetime.now(timezone.utc)
+
+        async with db_session() as session:
+            q = (
+                select(QueryModel)
+                .where(QueryModel.created_at >= start_dt, QueryModel.created_at <= end_dt)
+                .order_by(desc(QueryModel.created_at))
+                .offset(skip)
+                .limit(top + 1)
+            )
+            if intent:
+                q = q.where(QueryModel.intent == intent)
+            if verdict:
+                q = q.where(QueryModel.verdict == verdict)
+            if region and region.upper() in _SUPPORTED_REGIONS:
+                q = q.where(QueryModel.region == region.upper())
+
+            result = await session.execute(q)
+            rows_raw = result.scalars().all()
+
+        has_next = len(rows_raw) > top
+        rows_raw = rows_raw[:top]
+
+        rows = [
+            {
+                "id":         r.id,
+                "tenant_id":  r.tenant_id,
+                "session_id": r.session_id,
+                "raw_query":  r.raw_query,
+                "intent":     r.intent,
+                "verdict":    r.verdict,
+                "region":     r.region,
+                "trace_id":   r.trace_id,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows_raw
+        ]
+
+        next_skip = skip + top if has_next else None
+        return _odata_response("queries", rows, next_skip)
+
+    except Exception as exc:
+        logger.warning("OData queries failed: %s", exc)
+        return _odata_response("queries", [])
+
+
+@router.get("/odata/traces")
+async def odata_traces(
+    start: str | None = Query(default=None, description="ISO start date"),
+    end: str | None = Query(default=None),
+    top: int = Query(default=_PAGE_SIZE, ge=1, le=5000, alias="$top"),
+    skip: int = Query(default=0, ge=0, alias="$skip"),
+):
+    """OData v4 bitemporal decision traces — valid_time vs system_time for replay audit."""
+    try:
+        from sqlalchemy import select, desc
+        from app.db.session import db_session
+        from app.db.models import Trace
+
+        start_dt = _parse_dt(start) or (datetime.now(timezone.utc) - timedelta(days=90))
+        end_dt   = _parse_dt(end)   or datetime.now(timezone.utc)
+
+        async with db_session() as session:
+            q = (
+                select(Trace)
+                .where(Trace.created_at >= start_dt, Trace.created_at <= end_dt)
+                .order_by(desc(Trace.created_at))
+                .offset(skip)
+                .limit(top + 1)
+            )
+            result = await session.execute(q)
+            rows_raw = result.scalars().all()
+
+        has_next = len(rows_raw) > top
+        rows_raw = rows_raw[:top]
+
+        rows = [
+            {
+                "id":            r.id,
+                "tenant_id":     r.tenant_id,
+                "query_id":      r.query_id,
+                "valid_time":    r.valid_time.isoformat() if r.valid_time else None,
+                "system_time":   r.system_time.isoformat() if r.system_time else None,
+                "model_profile": r.model_profile,
+                "created_at":    r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows_raw
+        ]
+
+        next_skip = skip + top if has_next else None
+        return _odata_response("traces", rows, next_skip)
+
+    except Exception as exc:
+        logger.warning("OData traces failed: %s", exc)
+        return _odata_response("traces", [])
 
 
 # ── CSV export ────────────────────────────────────────────────────────

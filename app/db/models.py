@@ -424,6 +424,36 @@ class RooftopSolarInterval(Base):
     ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class OfferTrack(Base):
+    """DISPATCHOFFERTRK — real-time rebid detection from 5-min dispatch reports.
+
+    Shows WHEN a generator's energy offer was last modified (offer_date) for each
+    settlement period. Available immediately in NEMWeb DispatchIS reports — no
+    30-day confidentiality delay unlike full bid data (BIDDAYOFFER_D/BIDPEROFFER_D).
+
+    NLP signal: if offer_date changes between consecutive dispatch intervals for the
+    same DUID → a rebid occurred. Combined with price spike context = rebid attribution.
+    """
+    __tablename__ = "offer_track"
+    __table_args__ = (
+        Index("ix_offer_track_duid_date", "duid", "settlement_date"),
+        Index("ix_offer_track_region_date", "region", "settlement_date"),
+        UniqueConstraint("duid", "settlement_date", "period_id", name="uq_offer_track_duid_date_period"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    duid: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    settlement_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    offer_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version_no: Mapped[int | None] = mapped_column(Integer)
+    energy_offer_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    raise_6s_offer_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    region: Mapped[str | None] = mapped_column(String(10), index=True)
+    source: Mapped[str] = mapped_column(String(30), nullable=False, default="DISPATCHOFFERTRK")
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class WeatherObservation(Base):
     """Persisted weather consensus snapshot per NEM region, written every poll cycle.
 

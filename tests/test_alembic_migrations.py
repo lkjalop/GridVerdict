@@ -25,7 +25,7 @@ import pytest
 _MIGRATIONS_DIR = (
     Path(__file__).parent.parent / "app" / "db" / "migrations" / "versions"
 )
-_EXPECTED_HEAD = "0006"
+_EXPECTED_HEAD = "0007_sprint_aa_bid_offers"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

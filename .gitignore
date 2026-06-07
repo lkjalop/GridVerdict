@@ -45,19 +45,27 @@ reports/
 Dump/
 dump/
 
-# Runtime data — logs, weights, manifests, caches (never commit)
-data/
+# Runtime data directory (top-level only) — logs, weights, manifests, caches (never commit)
+/data/
 
-# IDE
+# IDE and dev tooling
 .vscode/
 .idea/
+.claude/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Screenshots / QA artefacts
-*.png
-*.json
+# Microsoft Office temp files
+~$*.pptx
+~$*.xlsx
+~$*.docx
+
+# Root-level temp JSON (QA artefacts)
+tmp_e2e_*.json
 gridverdict_same_questions_results.json
 gridverdict_browser_qa*.db
+
+# Screenshots at project root (QA artefacts)
+gridverdict-*.png

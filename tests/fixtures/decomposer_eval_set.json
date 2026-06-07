@@ -1,0 +1,2724 @@
+{
+  "version": "2.0",
+  "description": "GridVerdict decomposer evaluation set — 232 NEM queries. Tests intent accuracy, region extraction, boolean flags, and out-of-scope detection against all three decomposer backends (rule-based, Ollama, Claude). Fields marked llm_only are not scored in rule-based mode.",
+  "cases": [
+    {
+      "id": "dc-001",
+      "query": "What is the current NSW dispatch price?",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.6,
+      "description": "canonical price lookup — NSW"
+    },
+    {
+      "id": "dc-002",
+      "query": "What is the QLD price forecast for the next hour?",
+      "region_hint": "QLD1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.6,
+      "requires_forecast": true,
+      "description": "forecast lookup — QLD"
+    },
+    {
+      "id": "dc-003",
+      "query": "Show me the SA dispatch data",
+      "region_hint": "SA1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.5,
+      "description": "implicit lookup — SA"
+    },
+    {
+      "id": "dc-004",
+      "query": "What is the current VIC spot price?",
+      "region_hint": "VIC1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.6,
+      "description": "VIC price lookup"
+    },
+    {
+      "id": "dc-011",
+      "query": "Should I dispatch my battery in NSW right now?",
+      "region_hint": "NSW1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "description": "canonical dispatch recommendation — NSW"
+    },
+    {
+      "id": "dc-012",
+      "query": "Should I dispatch my SA battery?",
+      "region_hint": "SA1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.75,
+      "description": "SA battery dispatch recommendation"
+    },
+    {
+      "id": "dc-013",
+      "query": "What action should I take with my VIC battery right now?",
+      "region_hint": "VIC1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.7,
+      "description": "VIC battery action recommendation"
+    },
+    {
+      "id": "dc-014",
+      "query": "Recommend a dispatch strategy for my QLD battery",
+      "region_hint": "QLD1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.7,
+      "description": "QLD battery dispatch strategy"
+    },
+    {
+      "id": "dc-015",
+      "query": "Should I charge my TAS battery given current prices?",
+      "region_hint": "TAS1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.7,
+      "description": "TAS battery charge recommendation"
+    },
+    {
+      "id": "dc-021",
+      "query": "Why is the NSW price so high right now?",
+      "region_hint": "NSW1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "description": "canonical explanation — NSW spike"
+    },
+    {
+      "id": "dc-022",
+      "query": "Why is the VIC price elevated this afternoon?",
+      "region_hint": "VIC1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.75,
+      "description": "VIC price explanation"
+    },
+    {
+      "id": "dc-023",
+      "query": "What is driving the SA price spike?",
+      "region_hint": "SA1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.75,
+      "description": "SA explanation — driving cause"
+    },
+    {
+      "id": "dc-024",
+      "query": "Explain why QLD had high prices during the morning peak",
+      "region_hint": "QLD1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "description": "QLD explanation with time context"
+    },
+    {
+      "id": "dc-031",
+      "query": "What is the last time NSW had a price this high?",
+      "region_hint": "NSW1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "canonical retrospective — NSW analog"
+    },
+    {
+      "id": "dc-032",
+      "query": "When did VIC last see a price above $5000 per MWh?",
+      "region_hint": "VIC1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "VIC retrospective with price threshold"
+    },
+    {
+      "id": "dc-033",
+      "query": "Show me historical high-price periods for QLD",
+      "region_hint": "QLD1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "QLD historical price lookup"
+    },
+    {
+      "id": "dc-041",
+      "query": "What would have happened if I had dispatched at 2pm yesterday?",
+      "region_hint": "NSW1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "description": "canonical counterfactual — yesterday dispatch"
+    },
+    {
+      "id": "dc-042",
+      "query": "Simulate what would have happened if I charged my battery this morning",
+      "region_hint": "NSW1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.65,
+      "description": "counterfactual simulation — charging"
+    },
+    {
+      "id": "dc-051",
+      "query": "Compare NSW and VIC prices right now",
+      "region_hint": "NSW1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "NSW1",
+        "VIC1"
+      ],
+      "min_confidence": 0.7,
+      "description": "canonical comparison — NSW vs VIC"
+    },
+    {
+      "id": "dc-052",
+      "query": "What is the difference between NSW and SA dispatch prices?",
+      "region_hint": "NSW1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "NSW1",
+        "SA1"
+      ],
+      "min_confidence": 0.65,
+      "description": "NSW vs SA dispatch comparison"
+    },
+    {
+      "id": "dc-061",
+      "query": "Replay the decision trace from yesterday afternoon",
+      "region_hint": "NSW1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.75,
+      "description": "canonical trace replay"
+    },
+    {
+      "id": "dc-062",
+      "query": "What did you recommend at 3pm yesterday?",
+      "region_hint": "NSW1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "description": "trace replay — historical decision at time"
+    },
+    {
+      "id": "dc-071",
+      "query": "What is the current bitcoin price",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.8,
+      "description": "OOS — cryptocurrency price"
+    },
+    {
+      "id": "dc-072",
+      "query": "How is the weather in Sydney today?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.7,
+      "description": "OOS — weather query"
+    },
+    {
+      "id": "dc-073",
+      "query": "What are the latest federal election polls?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.7,
+      "description": "OOS — political polls"
+    },
+    {
+      "id": "dc-074",
+      "query": "How are ASX listed energy stocks performing today?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.7,
+      "description": "OOS — stock market"
+    },
+    {
+      "id": "dc-075",
+      "query": "What is the current AUD/USD forex rate?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.7,
+      "description": "OOS — forex"
+    },
+    {
+      "id": "dc-076",
+      "query": "Tell me about cryptocurrency trading strategies",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.7,
+      "description": "OOS — cryptocurrency trading"
+    },
+    {
+      "id": "dc-081",
+      "query": "prices",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.2,
+      "max_confidence": 0.8,
+      "description": "ultra-short query — should not crash"
+    },
+    {
+      "id": "dc-082",
+      "query": "battery dispatch NSW",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.5,
+      "max_confidence": 0.85,
+      "description": "keyword-only query — no verb context"
+    },
+    {
+      "id": "dc-100",
+      "query": "What is the current TAS dispatch price?",
+      "region_hint": "TAS1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.6,
+      "description": "TAS price lookup"
+    },
+    {
+      "id": "dc-101",
+      "query": "Show me NSW interconnector flows right now",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.55,
+      "description": "NSW interconnector lookup"
+    },
+    {
+      "id": "dc-102",
+      "query": "What is the current VIC demand?",
+      "region_hint": "VIC1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.6,
+      "description": "VIC demand lookup"
+    },
+    {
+      "id": "dc-103",
+      "query": "What is the SA renewable generation percentage right now?",
+      "region_hint": "SA1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.6,
+      "description": "SA renewable percentage lookup"
+    },
+    {
+      "id": "dc-104",
+      "query": "Show me all NEM region prices",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1",
+        "VIC1",
+        "QLD1",
+        "SA1",
+        "TAS1"
+      ],
+      "min_confidence": 0.6,
+      "description": "all-region price lookup — expands to all 5"
+    },
+    {
+      "id": "dc-105",
+      "query": "What is the current NSW FCAS price?",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.55,
+      "description": "NSW FCAS price lookup"
+    },
+    {
+      "id": "dc-106",
+      "query": "What is the NSW dispatch price per megawatt hour?",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.65,
+      "description": "NSW price $/MWh phrasing"
+    },
+    {
+      "id": "dc-107",
+      "query": "What's the VIC spot price today?",
+      "region_hint": "VIC1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.6,
+      "description": "VIC spot price — colloquial"
+    },
+    {
+      "id": "dc-108",
+      "query": "QLD current price",
+      "region_hint": "QLD1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.45,
+      "max_confidence": 0.8,
+      "description": "QLD price — short terse query"
+    },
+    {
+      "id": "dc-109",
+      "query": "SA market price now",
+      "region_hint": "SA1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.45,
+      "max_confidence": 0.8,
+      "description": "SA price — terse query"
+    },
+    {
+      "id": "dc-110",
+      "query": "How much power is NSW currently generating from coal?",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.55,
+      "description": "NSW coal generation lookup"
+    },
+    {
+      "id": "dc-111",
+      "query": "What is the TAS-VIC interconnector capacity utilisation?",
+      "region_hint": "TAS1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "TAS1",
+        "VIC1"
+      ],
+      "min_confidence": 0.55,
+      "description": "TAS-VIC Basslink interconnector lookup"
+    },
+    {
+      "id": "dc-112",
+      "query": "What is the current NSW generation mix?",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.6,
+      "description": "NSW generation mix"
+    },
+    {
+      "id": "dc-113",
+      "query": "How is SA solar performing today?",
+      "region_hint": "SA1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.55,
+      "description": "SA solar output — today"
+    },
+    {
+      "id": "dc-114",
+      "query": "QLD wind output right now",
+      "region_hint": "QLD1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.45,
+      "max_confidence": 0.8,
+      "description": "QLD wind generation — terse"
+    },
+    {
+      "id": "dc-115",
+      "query": "What is the NSW predispatch price for the next 30 minutes?",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.6,
+      "requires_forecast": true,
+      "description": "NSW predispatch price — near-term forecast"
+    },
+    {
+      "id": "dc-116",
+      "query": "NSW load forecast for next interval",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.6,
+      "requires_forecast": true,
+      "description": "NSW load forecast — next interval"
+    },
+    {
+      "id": "dc-117",
+      "query": "What is the current constraint count in QLD?",
+      "region_hint": "QLD1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.5,
+      "description": "QLD constraint count"
+    },
+    {
+      "id": "dc-118",
+      "query": "TAS spot price in dollars per megawatt hour",
+      "region_hint": "TAS1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.6,
+      "description": "TAS price with unit phrasing"
+    },
+    {
+      "id": "dc-119",
+      "query": "VIC wholesale electricity price",
+      "region_hint": "VIC1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.6,
+      "description": "VIC wholesale price"
+    },
+    {
+      "id": "dc-120",
+      "query": "What are the active AEMO notices for NSW?",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.55,
+      "description": "NSW AEMO notices lookup"
+    },
+    {
+      "id": "dc-121",
+      "query": "SA metered generation total",
+      "region_hint": "SA1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.45,
+      "max_confidence": 0.8,
+      "description": "SA metered generation — very terse"
+    },
+    {
+      "id": "dc-122",
+      "query": "What is the energy price in Queensland right now?",
+      "region_hint": "QLD1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.6,
+      "description": "QLD price using state name"
+    },
+    {
+      "id": "dc-123",
+      "query": "VIC demand forecast for next hour",
+      "region_hint": "VIC1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.6,
+      "requires_forecast": true,
+      "description": "VIC demand forecast — hourly"
+    },
+    {
+      "id": "dc-124",
+      "query": "What is the current NSW marginal loss factor?",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.55,
+      "description": "NSW marginal loss factor"
+    },
+    {
+      "id": "dc-125",
+      "query": "Show me NSW supply and demand balance",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.55,
+      "description": "NSW supply-demand balance"
+    },
+    {
+      "id": "dc-126",
+      "query": "What is the QLD cap price status?",
+      "region_hint": "QLD1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.5,
+      "description": "QLD market cap status"
+    },
+    {
+      "id": "dc-127",
+      "query": "SA gas generation output now",
+      "region_hint": "SA1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.5,
+      "description": "SA gas generation — terse"
+    },
+    {
+      "id": "dc-128",
+      "query": "TAS renewable energy percentage",
+      "region_hint": "TAS1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.5,
+      "description": "TAS renewables share"
+    },
+    {
+      "id": "dc-129",
+      "query": "NSW current electricity price",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.6,
+      "description": "NSW electricity price — colloquial"
+    },
+    {
+      "id": "dc-130",
+      "query": "VIC frequency control ancillary services market status",
+      "region_hint": "VIC1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.5,
+      "description": "VIC FCAS market lookup"
+    },
+    {
+      "id": "dc-131",
+      "query": "What is the NSW-QLD interconnector flow direction?",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1",
+        "QLD1"
+      ],
+      "min_confidence": 0.55,
+      "description": "NSW-QLD QNI interconnector flow"
+    },
+    {
+      "id": "dc-132",
+      "query": "SA battery discharge capacity right now",
+      "region_hint": "SA1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.5,
+      "description": "SA battery capacity lookup"
+    },
+    {
+      "id": "dc-133",
+      "query": "What is the current NSW gas peaker output?",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.55,
+      "description": "NSW gas peaker generation lookup"
+    },
+    {
+      "id": "dc-200",
+      "query": "Is it a good time to dispatch my NSW battery?",
+      "region_hint": "NSW1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "requires_why": true,
+      "requires_live_market": true,
+      "description": "NSW battery dispatch timing — indirect phrasing"
+    },
+    {
+      "id": "dc-201",
+      "query": "Should I charge or discharge my VIC battery right now?",
+      "region_hint": "VIC1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "description": "VIC battery charge/discharge decision"
+    },
+    {
+      "id": "dc-202",
+      "query": "What action should my QLD BESS take right now?",
+      "region_hint": "QLD1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.7,
+      "requires_why": true,
+      "requires_bess_context": true,
+      "description": "QLD BESS action — requires BESS context"
+    },
+    {
+      "id": "dc-203",
+      "query": "Should I hold my SA battery or dispatch into this price event?",
+      "region_hint": "SA1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "description": "SA battery hold-or-dispatch decision"
+    },
+    {
+      "id": "dc-204",
+      "query": "When should I dispatch my TAS battery today?",
+      "region_hint": "TAS1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.65,
+      "requires_why": true,
+      "description": "TAS battery dispatch timing"
+    },
+    {
+      "id": "dc-205",
+      "query": "Is the NSW price spike likely to continue — should I wait or dispatch?",
+      "region_hint": "NSW1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "requires_why": true,
+      "spike_thresholds": [
+        300.0
+      ],
+      "description": "NSW spike continuation — dispatch timing with threshold"
+    },
+    {
+      "id": "dc-206",
+      "query": "NSW price is above $1000/MWh — should I dispatch everything now?",
+      "region_hint": "NSW1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "spike_thresholds": [
+        1000.0
+      ],
+      "description": "NSW dispatch at $1000 spike"
+    },
+    {
+      "id": "dc-207",
+      "query": "SA price is negative — should I charge my battery?",
+      "region_hint": "SA1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "spike_thresholds": [
+        0.0
+      ],
+      "description": "SA negative price charge opportunity"
+    },
+    {
+      "id": "dc-208",
+      "query": "Should I participate in VIC FCAS market with my battery?",
+      "region_hint": "VIC1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.7,
+      "requires_why": true,
+      "description": "VIC FCAS participation decision"
+    },
+    {
+      "id": "dc-209",
+      "query": "QLD battery — should I wait for a better price or dispatch now?",
+      "region_hint": "QLD1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.7,
+      "requires_why": true,
+      "description": "QLD battery wait-vs-dispatch"
+    },
+    {
+      "id": "dc-210",
+      "query": "Before I act: what is the NSW market evidence right now?",
+      "region_hint": "NSW1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "description": "NSW pre-action evidence check"
+    },
+    {
+      "id": "dc-211",
+      "query": "What is missing before I act in the NSW market?",
+      "region_hint": "NSW1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "requires_why": true,
+      "description": "NSW missing-data pre-action check"
+    },
+    {
+      "id": "dc-212",
+      "query": "Is there a dispatch opportunity in VIC right now?",
+      "region_hint": "VIC1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.65,
+      "requires_why": true,
+      "description": "VIC dispatch opportunity check"
+    },
+    {
+      "id": "dc-213",
+      "query": "My VIC battery has 80% state of charge — should I dispatch?",
+      "region_hint": "VIC1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "requires_bess_context": true,
+      "description": "VIC battery with SoC context"
+    },
+    {
+      "id": "dc-214",
+      "query": "What should I do with my SA BESS given current market conditions?",
+      "region_hint": "SA1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.7,
+      "requires_why": true,
+      "requires_bess_context": true,
+      "description": "SA BESS action — full context"
+    },
+    {
+      "id": "dc-215",
+      "query": "TAS — import or export decision for my battery right now?",
+      "region_hint": "TAS1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.65,
+      "requires_why": true,
+      "description": "TAS import/export battery decision"
+    },
+    {
+      "id": "dc-216",
+      "query": "Is the QLD price spike over or should I keep dispatching?",
+      "region_hint": "QLD1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.7,
+      "requires_why": true,
+      "spike_thresholds": [
+        300.0
+      ],
+      "description": "QLD spike continuation dispatch decision"
+    },
+    {
+      "id": "dc-217",
+      "query": "Should my QLD BESS be charging now given the price forecast?",
+      "region_hint": "QLD1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.7,
+      "requires_why": true,
+      "requires_forecast": true,
+      "requires_bess_context": true,
+      "description": "QLD BESS charge with forecast"
+    },
+    {
+      "id": "dc-218",
+      "query": "Recommend a dispatch action for my NSW portfolio right now",
+      "region_hint": "NSW1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "description": "NSW portfolio dispatch recommendation"
+    },
+    {
+      "id": "dc-219",
+      "query": "VIC market looks volatile — should I dispatch or wait?",
+      "region_hint": "VIC1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.7,
+      "requires_why": true,
+      "description": "VIC volatile market dispatch decision"
+    },
+    {
+      "id": "dc-220",
+      "query": "Should I bid my NSW gas peaker into the next interval?",
+      "region_hint": "NSW1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "requires_why": true,
+      "requires_live_market": true,
+      "description": "NSW gas peaker bid decision"
+    },
+    {
+      "id": "dc-221",
+      "query": "VIC peak event — should I be dispatching everything?",
+      "region_hint": "VIC1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.7,
+      "requires_why": true,
+      "requires_live_market": true,
+      "description": "VIC peak event dispatch"
+    },
+    {
+      "id": "dc-222",
+      "query": "What's the right action for my TAS hydro unit right now?",
+      "region_hint": "TAS1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.65,
+      "requires_why": true,
+      "description": "TAS hydro action recommendation"
+    },
+    {
+      "id": "dc-223",
+      "query": "Should I charge my NSW battery now given the forecast drop?",
+      "region_hint": "NSW1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "requires_why": true,
+      "requires_forecast": true,
+      "description": "NSW battery charge with forecast drop context"
+    },
+    {
+      "id": "dc-224",
+      "query": "Is now a good time to dispatch in SA?",
+      "region_hint": "SA1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.65,
+      "requires_why": true,
+      "requires_live_market": true,
+      "description": "SA dispatch opportunity — indirect"
+    },
+    {
+      "id": "dc-300",
+      "query": "Why is the NSW price negative right now?",
+      "region_hint": "NSW1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.8,
+      "requires_why": true,
+      "causal_targets": [
+        "renewable_generation",
+        "demand"
+      ],
+      "description": "NSW negative price explanation"
+    },
+    {
+      "id": "dc-301",
+      "query": "What caused the VIC spike this afternoon?",
+      "region_hint": "VIC1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "causal_targets": [
+        "generation",
+        "demand"
+      ],
+      "description": "VIC price spike causation"
+    },
+    {
+      "id": "dc-302",
+      "query": "Explain why QLD prices are elevated today",
+      "region_hint": "QLD1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.8,
+      "requires_why": true,
+      "description": "QLD elevated price explanation"
+    },
+    {
+      "id": "dc-303",
+      "query": "Why is SA running on 80% wind today?",
+      "region_hint": "SA1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "causal_targets": [
+        "wind_generation"
+      ],
+      "description": "SA wind-heavy generation explanation"
+    },
+    {
+      "id": "dc-304",
+      "query": "What's causing the TAS price premium over the mainland?",
+      "region_hint": "TAS1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "description": "TAS price premium vs mainland"
+    },
+    {
+      "id": "dc-305",
+      "query": "Why did NSW prices spike at 6pm yesterday?",
+      "region_hint": "NSW1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "requires_history": true,
+      "requires_incident_timeline": true,
+      "description": "NSW yesterday spike — needs incident timeline"
+    },
+    {
+      "id": "dc-306",
+      "query": "What AEMO market notice explains the current VIC price rise?",
+      "region_hint": "VIC1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "requires_incident_timeline": true,
+      "description": "VIC price rise with AEMO notice context"
+    },
+    {
+      "id": "dc-307",
+      "query": "Explain the QLD renewable oversupply causing negative prices",
+      "region_hint": "QLD1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.8,
+      "requires_why": true,
+      "causal_targets": [
+        "renewable_generation"
+      ],
+      "description": "QLD renewable oversupply → negative price"
+    },
+    {
+      "id": "dc-308",
+      "query": "Why is the NSW-VIC interconnector flowing at its limit?",
+      "region_hint": "NSW1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "NSW1",
+        "VIC1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "causal_targets": [
+        "interconnector"
+      ],
+      "description": "NSW-VIC interconnector limit explanation"
+    },
+    {
+      "id": "dc-309",
+      "query": "What drove TAS prices up last night?",
+      "region_hint": "TAS1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "requires_history": true,
+      "description": "TAS overnight price driver"
+    },
+    {
+      "id": "dc-310",
+      "query": "What is the root cause of the current SA price event?",
+      "region_hint": "SA1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.8,
+      "requires_why": true,
+      "description": "SA current price event root cause"
+    },
+    {
+      "id": "dc-311",
+      "query": "Why is NSW demand so high this morning?",
+      "region_hint": "NSW1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.8,
+      "requires_why": true,
+      "causal_targets": [
+        "demand"
+      ],
+      "description": "NSW demand driver explanation"
+    },
+    {
+      "id": "dc-312",
+      "query": "What constraint is binding and driving the VIC price spike?",
+      "region_hint": "VIC1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "causal_targets": [
+        "constraint"
+      ],
+      "description": "VIC binding constraint explanation"
+    },
+    {
+      "id": "dc-313",
+      "query": "Why is QLD wind output low today?",
+      "region_hint": "QLD1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "causal_targets": [
+        "wind_generation"
+      ],
+      "description": "QLD low wind output driver"
+    },
+    {
+      "id": "dc-314",
+      "query": "Why are NSW prices above $1000 per MWh right now?",
+      "region_hint": "NSW1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.8,
+      "requires_why": true,
+      "spike_thresholds": [
+        1000.0
+      ],
+      "description": "NSW $1000 spike explanation with threshold"
+    },
+    {
+      "id": "dc-315",
+      "query": "Explain the VIC evening demand peak causing high prices",
+      "region_hint": "VIC1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.8,
+      "requires_why": true,
+      "causal_targets": [
+        "demand"
+      ],
+      "description": "VIC evening demand peak driver"
+    },
+    {
+      "id": "dc-316",
+      "query": "What is behind the QLD price volatility today?",
+      "region_hint": "QLD1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "description": "QLD price volatility driver"
+    },
+    {
+      "id": "dc-317",
+      "query": "Why is SA importing from VIC at maximum capacity?",
+      "region_hint": "SA1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "SA1",
+        "VIC1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "causal_targets": [
+        "interconnector"
+      ],
+      "description": "SA max import explanation"
+    },
+    {
+      "id": "dc-318",
+      "query": "What caused the TAS price drop this afternoon?",
+      "region_hint": "TAS1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "description": "TAS price drop causation"
+    },
+    {
+      "id": "dc-319",
+      "query": "Why is NSW generation mix shifting toward gas peakers?",
+      "region_hint": "NSW1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "causal_targets": [
+        "gas_generation"
+      ],
+      "description": "NSW gas peaker dispatch explanation"
+    },
+    {
+      "id": "dc-320",
+      "query": "What is the evidence supporting the VIC price event?",
+      "region_hint": "VIC1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "description": "VIC price event evidence request"
+    },
+    {
+      "id": "dc-321",
+      "query": "Explain the QLD constraint binding right now",
+      "region_hint": "QLD1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.8,
+      "requires_why": true,
+      "causal_targets": [
+        "constraint"
+      ],
+      "description": "QLD constraint binding explanation"
+    },
+    {
+      "id": "dc-322",
+      "query": "Why is SA at the market price cap?",
+      "region_hint": "SA1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.8,
+      "requires_why": true,
+      "spike_thresholds": [
+        14500.0
+      ],
+      "description": "SA market cap event explanation"
+    },
+    {
+      "id": "dc-323",
+      "query": "What changed in NSW to cause the price to fall?",
+      "region_hint": "NSW1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "description": "NSW price fall causation"
+    },
+    {
+      "id": "dc-324",
+      "query": "What evidence supports the claim that VIC demand caused the spike?",
+      "region_hint": "VIC1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.75,
+      "requires_why": true,
+      "causal_targets": [
+        "demand"
+      ],
+      "description": "VIC demand spike evidence query"
+    },
+    {
+      "id": "dc-400",
+      "query": "Has NSW ever seen prices this high before?",
+      "region_hint": "NSW1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "NSW historical price analogs"
+    },
+    {
+      "id": "dc-401",
+      "query": "When did VIC last experience a sustained price spike?",
+      "region_hint": "VIC1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "VIC last sustained spike"
+    },
+    {
+      "id": "dc-402",
+      "query": "Show me historical QLD price events above $300 per MWh",
+      "region_hint": "QLD1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "QLD historical events above threshold"
+    },
+    {
+      "id": "dc-403",
+      "query": "What are the SA analogs for this price event?",
+      "region_hint": "SA1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "SA historical analog search"
+    },
+    {
+      "id": "dc-404",
+      "query": "Has TAS been cut off from the mainland before?",
+      "region_hint": "TAS1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "TAS mainland isolation history"
+    },
+    {
+      "id": "dc-405",
+      "query": "When did NSW last hit the market price cap?",
+      "region_hint": "NSW1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "NSW market cap occurrence history"
+    },
+    {
+      "id": "dc-406",
+      "query": "What historical events are similar to the current VIC situation?",
+      "region_hint": "VIC1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "VIC historical situation analogs"
+    },
+    {
+      "id": "dc-407",
+      "query": "Has QLD seen this pattern during summer before?",
+      "region_hint": "QLD1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "QLD summer price pattern history"
+    },
+    {
+      "id": "dc-408",
+      "query": "SA negative price events in the last year",
+      "region_hint": "SA1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "SA negative price historical frequency"
+    },
+    {
+      "id": "dc-409",
+      "query": "TAS hydro shortage analogs from past years",
+      "region_hint": "TAS1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "TAS hydro shortage history"
+    },
+    {
+      "id": "dc-410",
+      "query": "Historical NSW demand patterns during heatwaves",
+      "region_hint": "NSW1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "NSW heatwave demand history"
+    },
+    {
+      "id": "dc-411",
+      "query": "VIC price spike frequency — how often does this happen?",
+      "region_hint": "VIC1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "VIC spike frequency base rate"
+    },
+    {
+      "id": "dc-412",
+      "query": "QLD renewable oversupply historical cases",
+      "region_hint": "QLD1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.6,
+      "requires_history": true,
+      "description": "QLD renewable oversupply history"
+    },
+    {
+      "id": "dc-413",
+      "query": "SA extreme price event base rate",
+      "region_hint": "SA1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.6,
+      "requires_history": true,
+      "description": "SA extreme price base rate"
+    },
+    {
+      "id": "dc-414",
+      "query": "NSW morning peak price analogs",
+      "region_hint": "NSW1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.6,
+      "requires_history": true,
+      "description": "NSW morning peak analogs"
+    },
+    {
+      "id": "dc-415",
+      "query": "VIC constraint history for the Heywood interconnector",
+      "region_hint": "VIC1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.6,
+      "requires_history": true,
+      "description": "VIC Heywood interconnector constraint history"
+    },
+    {
+      "id": "dc-416",
+      "query": "What happened to NSW prices in the last major heatwave?",
+      "region_hint": "NSW1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "NSW heatwave price event history"
+    },
+    {
+      "id": "dc-417",
+      "query": "QLD price spike occurrence rate in summer months",
+      "region_hint": "QLD1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.6,
+      "requires_history": true,
+      "description": "QLD summer spike rate"
+    },
+    {
+      "id": "dc-418",
+      "query": "Show me TAS historical generation shortfall events",
+      "region_hint": "TAS1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "TAS generation shortfall history"
+    },
+    {
+      "id": "dc-419",
+      "query": "SA market power events — what happened before?",
+      "region_hint": "SA1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "SA market power historical events"
+    },
+    {
+      "id": "dc-420",
+      "query": "VIC summer demand peaks — historical data please",
+      "region_hint": "VIC1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "VIC summer demand peak history"
+    },
+    {
+      "id": "dc-421",
+      "query": "Has SA had price events similar to this in the last six months?",
+      "region_hint": "SA1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "SA recent price event analogs"
+    },
+    {
+      "id": "dc-500",
+      "query": "What would have happened if I dispatched my NSW battery at 6am yesterday?",
+      "region_hint": "NSW1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "NSW yesterday 6am dispatch counterfactual"
+    },
+    {
+      "id": "dc-501",
+      "query": "If I had charged my VIC battery last night, what would my revenue be?",
+      "region_hint": "VIC1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "VIC overnight charge revenue counterfactual"
+    },
+    {
+      "id": "dc-502",
+      "query": "What would the outcome have been if QLD dispatched two hours earlier?",
+      "region_hint": "QLD1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "QLD earlier dispatch counterfactual"
+    },
+    {
+      "id": "dc-503",
+      "query": "Simulate the SA market if I had participated in FCAS this morning",
+      "region_hint": "SA1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.65,
+      "requires_backtest": true,
+      "description": "SA FCAS participation simulation"
+    },
+    {
+      "id": "dc-504",
+      "query": "What if I held my TAS battery and discharged at yesterday's peak?",
+      "region_hint": "TAS1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "TAS hold-until-peak counterfactual"
+    },
+    {
+      "id": "dc-505",
+      "query": "What would have happened if NSW prices had not spiked?",
+      "region_hint": "NSW1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "description": "NSW no-spike counterfactual scenario"
+    },
+    {
+      "id": "dc-506",
+      "query": "If the VIC-SA interconnector hadn't been constrained this morning, what would prices be?",
+      "region_hint": "VIC1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "VIC1",
+        "SA1"
+      ],
+      "min_confidence": 0.65,
+      "description": "VIC-SA interconnector unconstrained counterfactual"
+    },
+    {
+      "id": "dc-507",
+      "query": "What if QLD solar had been 20% higher today?",
+      "region_hint": "QLD1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.7,
+      "description": "QLD higher solar output counterfactual"
+    },
+    {
+      "id": "dc-508",
+      "query": "Simulate SA dispatch from 3pm yesterday",
+      "region_hint": "SA1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.65,
+      "requires_backtest": true,
+      "requires_history": true,
+      "description": "SA afternoon dispatch simulation"
+    },
+    {
+      "id": "dc-509",
+      "query": "What would I have earned dispatching TAS at yesterday's peak price?",
+      "region_hint": "TAS1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "TAS peak dispatch earnings counterfactual"
+    },
+    {
+      "id": "dc-510",
+      "query": "What if NSW demand had been lower this afternoon?",
+      "region_hint": "NSW1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "description": "NSW lower demand counterfactual"
+    },
+    {
+      "id": "dc-511",
+      "query": "If my VIC battery had charged at 2am, would I be profitable now?",
+      "region_hint": "VIC1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "VIC overnight charge profitability counterfactual"
+    },
+    {
+      "id": "dc-512",
+      "query": "Backtest my QLD battery strategy from last Monday",
+      "region_hint": "QLD1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.65,
+      "requires_backtest": true,
+      "requires_history": true,
+      "description": "QLD last Monday strategy backtest"
+    },
+    {
+      "id": "dc-513",
+      "query": "What would happen to SA prices if wind dropped by 50%?",
+      "region_hint": "SA1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.7,
+      "description": "SA wind generation counterfactual"
+    },
+    {
+      "id": "dc-514",
+      "query": "What would the NSW price be without the binding constraint?",
+      "region_hint": "NSW1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "description": "NSW unconstrained price counterfactual"
+    },
+    {
+      "id": "dc-515",
+      "query": "Counterfactual: VIC battery dispatched two hours earlier yesterday",
+      "region_hint": "VIC1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.7,
+      "requires_history": true,
+      "description": "VIC earlier dispatch counterfactual — explicit keyword"
+    },
+    {
+      "id": "dc-516",
+      "query": "What if TAS-VIC interconnector had been fully available yesterday?",
+      "region_hint": "TAS1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "TAS1",
+        "VIC1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "TAS-VIC full capacity counterfactual"
+    },
+    {
+      "id": "dc-517",
+      "query": "If VIC demand had been at last week's level, what would prices be today?",
+      "region_hint": "VIC1",
+      "expected_intent": "counterfactual",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "VIC prior-week demand counterfactual"
+    },
+    {
+      "id": "dc-600",
+      "query": "How does the NSW price compare to VIC right now?",
+      "region_hint": "NSW1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "NSW1",
+        "VIC1"
+      ],
+      "min_confidence": 0.7,
+      "description": "NSW vs VIC live price comparison"
+    },
+    {
+      "id": "dc-601",
+      "query": "What's the difference between QLD and NSW dispatch prices?",
+      "region_hint": "QLD1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "QLD1",
+        "NSW1"
+      ],
+      "min_confidence": 0.65,
+      "description": "QLD vs NSW dispatch price diff"
+    },
+    {
+      "id": "dc-602",
+      "query": "Compare SA solar output to QLD solar output",
+      "region_hint": "SA1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "SA1",
+        "QLD1"
+      ],
+      "min_confidence": 0.7,
+      "description": "SA vs QLD solar output comparison"
+    },
+    {
+      "id": "dc-603",
+      "query": "TAS versus mainland prices — how big is the spread?",
+      "region_hint": "TAS1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.65,
+      "description": "TAS vs mainland price spread"
+    },
+    {
+      "id": "dc-604",
+      "query": "Compare today's NSW demand to yesterday",
+      "region_hint": "NSW1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "NSW today vs yesterday demand"
+    },
+    {
+      "id": "dc-605",
+      "query": "How does VIC evening demand compare to morning demand today?",
+      "region_hint": "VIC1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.65,
+      "description": "VIC morning vs evening demand comparison"
+    },
+    {
+      "id": "dc-606",
+      "query": "QLD summer prices versus winter prices — what's the pattern?",
+      "region_hint": "QLD1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "QLD seasonal price comparison"
+    },
+    {
+      "id": "dc-607",
+      "query": "SA wind versus solar generation today",
+      "region_hint": "SA1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.65,
+      "description": "SA wind vs solar comparison"
+    },
+    {
+      "id": "dc-608",
+      "query": "NSW gas versus renewables generation share right now",
+      "region_hint": "NSW1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.65,
+      "description": "NSW gas vs renewables share"
+    },
+    {
+      "id": "dc-609",
+      "query": "VIC versus SA renewable percentage comparison",
+      "region_hint": "VIC1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "VIC1",
+        "SA1"
+      ],
+      "min_confidence": 0.65,
+      "description": "VIC vs SA renewables share"
+    },
+    {
+      "id": "dc-610",
+      "query": "Compare SA and TAS dispatch prices right now",
+      "region_hint": "SA1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "SA1",
+        "TAS1"
+      ],
+      "min_confidence": 0.7,
+      "description": "SA vs TAS dispatch price comparison"
+    },
+    {
+      "id": "dc-611",
+      "query": "NSW forecast versus actual price — how big was the error?",
+      "region_hint": "NSW1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.65,
+      "requires_forecast": true,
+      "requires_history": true,
+      "description": "NSW forecast vs actual price error"
+    },
+    {
+      "id": "dc-612",
+      "query": "VIC constrained versus unconstrained period price comparison",
+      "region_hint": "VIC1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "VIC constrained vs unconstrained prices"
+    },
+    {
+      "id": "dc-613",
+      "query": "QLD wet season versus dry season renewable output",
+      "region_hint": "QLD1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "QLD seasonal renewable output comparison"
+    },
+    {
+      "id": "dc-614",
+      "query": "SA on a strong wind day versus a calm day — price comparison",
+      "region_hint": "SA1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.65,
+      "description": "SA wind vs calm day prices"
+    },
+    {
+      "id": "dc-615",
+      "query": "TAS versus VIC interconnector utilisation comparison",
+      "region_hint": "TAS1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "TAS1",
+        "VIC1"
+      ],
+      "min_confidence": 0.65,
+      "description": "TAS-VIC interconnector utilisation vs"
+    },
+    {
+      "id": "dc-616",
+      "query": "NSW battery revenue this week compared to last week",
+      "region_hint": "NSW1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "NSW battery revenue week-on-week"
+    },
+    {
+      "id": "dc-617",
+      "query": "How does NSW demand today compare to the 30-day average?",
+      "region_hint": "NSW1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "NSW demand vs 30-day average"
+    },
+    {
+      "id": "dc-700",
+      "query": "Replay the NSW dispatch recommendation from this morning",
+      "region_hint": "NSW1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.75,
+      "description": "NSW this-morning dispatch trace replay"
+    },
+    {
+      "id": "dc-701",
+      "query": "What did the system recommend for VIC at 3pm yesterday?",
+      "region_hint": "VIC1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.7,
+      "description": "VIC yesterday 3pm recommendation trace"
+    },
+    {
+      "id": "dc-702",
+      "query": "Show me what evidence GridVerdict had for QLD at 10am",
+      "region_hint": "QLD1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.7,
+      "description": "QLD 10am evidence trace"
+    },
+    {
+      "id": "dc-703",
+      "query": "Trace the SA battery recommendation from earlier this morning",
+      "region_hint": "SA1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.75,
+      "description": "SA morning recommendation trace"
+    },
+    {
+      "id": "dc-704",
+      "query": "What was the system's analysis when TAS prices spiked yesterday?",
+      "region_hint": "TAS1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.65,
+      "description": "TAS spike trace replay"
+    },
+    {
+      "id": "dc-705",
+      "query": "What did you know about NSW when you made the morning recommendation?",
+      "region_hint": "NSW1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "description": "NSW morning recommendation context trace"
+    },
+    {
+      "id": "dc-706",
+      "query": "Show me the QLD decision trace from 2pm today",
+      "region_hint": "QLD1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.75,
+      "description": "QLD 2pm decision trace"
+    },
+    {
+      "id": "dc-707",
+      "query": "What evidence was available for SA when the price went negative?",
+      "region_hint": "SA1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.65,
+      "description": "SA negative price event trace"
+    },
+    {
+      "id": "dc-708",
+      "query": "NSW trace from the last high-price interval",
+      "region_hint": "NSW1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "description": "NSW last spike trace"
+    },
+    {
+      "id": "dc-709",
+      "query": "What was the system thinking at peak demand in VIC yesterday?",
+      "region_hint": "VIC1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.65,
+      "description": "VIC peak demand system state trace"
+    },
+    {
+      "id": "dc-710",
+      "query": "QLD replay the analysis from this morning's peak",
+      "region_hint": "QLD1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.75,
+      "description": "QLD morning peak replay"
+    },
+    {
+      "id": "dc-711",
+      "query": "What did you recommend for SA at 6am this morning?",
+      "region_hint": "SA1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.7,
+      "description": "SA 6am recommendation trace"
+    },
+    {
+      "id": "dc-712",
+      "query": "System state replay for NSW when the AEMO notice was issued",
+      "region_hint": "NSW1",
+      "expected_intent": "trace_replay",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.7,
+      "description": "NSW AEMO notice system state trace"
+    },
+    {
+      "id": "dc-800",
+      "query": "What is the NRL score today?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.7,
+      "description": "OOS — rugby league scores"
+    },
+    {
+      "id": "dc-801",
+      "query": "Who won the Melbourne Cup?",
+      "region_hint": "VIC1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.7,
+      "description": "OOS — horse racing event"
+    },
+    {
+      "id": "dc-802",
+      "query": "How are ASX 200 energy stocks performing today?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.7,
+      "description": "OOS — ASX stock performance"
+    },
+    {
+      "id": "dc-803",
+      "query": "Should I buy a house in Sydney right now?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.7,
+      "description": "OOS — real estate decision"
+    },
+    {
+      "id": "dc-804",
+      "query": "What is the petrol price at my local servo?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.7,
+      "description": "OOS — petrol retail price"
+    },
+    {
+      "id": "dc-805",
+      "query": "What is the electricity price in Darwin?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.8,
+      "description": "OOS — Darwin (NT) is not in the NEM"
+    },
+    {
+      "id": "dc-806",
+      "query": "What are Perth power prices?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.8,
+      "description": "OOS — Perth uses SWIS, not NEM"
+    },
+    {
+      "id": "dc-807",
+      "query": "Tell me about the Alice Springs electricity grid",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.8,
+      "description": "OOS — Alice Springs is NT, not NEM"
+    },
+    {
+      "id": "dc-808",
+      "query": "How does GridVerdict calculate its prices?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.8,
+      "description": "OOS meta — platform explanation"
+    },
+    {
+      "id": "dc-809",
+      "query": "What are GridVerdict's capabilities?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.8,
+      "description": "OOS meta — capabilities question"
+    },
+    {
+      "id": "dc-810",
+      "query": "Submit a dispatch bid to AEMO for my NSW battery",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.9,
+      "description": "OOS — bid submission not allowed"
+    },
+    {
+      "id": "dc-811",
+      "query": "Execute a sell order for my NSW battery at $500 per MWh",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.9,
+      "description": "OOS — execute sell order not allowed"
+    },
+    {
+      "id": "dc-812",
+      "query": "Place a real dispatch bid for 5MW in NSW right now",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.9,
+      "description": "OOS — place real bid not allowed"
+    },
+    {
+      "id": "dc-813",
+      "query": "Get me Bloomberg energy terminal data for NSW",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.85,
+      "description": "OOS — external platform Bloomberg"
+    },
+    {
+      "id": "dc-814",
+      "query": "What does OpenNEM show for NSW right now?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.85,
+      "description": "OOS — external platform OpenNEM"
+    },
+    {
+      "id": "dc-815",
+      "query": "How does GridVerdict compare to NEM Review?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.85,
+      "description": "OOS — external platform comparison"
+    },
+    {
+      "id": "dc-816",
+      "query": "What is the WattClarity commentary on today's NSW price?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.85,
+      "description": "OOS — external platform WattClarity"
+    },
+    {
+      "id": "dc-817",
+      "query": "What is the federal government's renewable energy policy?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.7,
+      "description": "OOS — government policy"
+    },
+    {
+      "id": "dc-818",
+      "query": "Calculate my household electricity bill for this month",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.7,
+      "description": "OOS — retail billing"
+    },
+    {
+      "id": "dc-819",
+      "query": "Tell me a joke about electricity prices",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.7,
+      "description": "OOS — entertainment request"
+    },
+    {
+      "id": "dc-820",
+      "query": "Should I invest in a renewable energy project in NSW?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.65,
+      "description": "OOS — investment advice not in scope"
+    },
+    {
+      "id": "dc-821",
+      "query": "What is the price of solar panels in Australia?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.65,
+      "description": "OOS — equipment retail price"
+    },
+    {
+      "id": "dc-822",
+      "query": "Write me a report about the NEM market structure",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.65,
+      "description": "OOS — document generation task"
+    },
+    {
+      "id": "dc-823",
+      "query": "How does electricity trading work in Australia generally?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.6,
+      "description": "OOS meta — education about NEM structure"
+    },
+    {
+      "id": "dc-900",
+      "query": "?",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.1,
+      "max_confidence": 0.75,
+      "description": "edge — single punctuation, should not crash"
+    },
+    {
+      "id": "dc-901",
+      "query": "NSW",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.2,
+      "max_confidence": 0.8,
+      "description": "edge — single region code, minimal context"
+    },
+    {
+      "id": "dc-902",
+      "query": "battery",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.2,
+      "max_confidence": 0.8,
+      "description": "edge — single keyword, no intent signals"
+    },
+    {
+      "id": "dc-903",
+      "query": "what's happening",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.3,
+      "max_confidence": 0.8,
+      "description": "edge — ambiguous status query"
+    },
+    {
+      "id": "dc-904",
+      "query": "WHAT IS THE CURRENT NSW DISPATCH PRICE RIGHT NOW?",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.6,
+      "description": "edge — all caps query, should normalise correctly"
+    },
+    {
+      "id": "dc-905",
+      "query": "Compare Perth and Sydney electricity prices",
+      "region_hint": "NSW1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.65,
+      "description": "edge — Perth non-NEM + Sydney NEM → partial answer for NSW1, not full OOS"
+    },
+    {
+      "id": "dc-906",
+      "query": "Why is the NSW price high and should I dispatch my battery?",
+      "region_hint": "NSW1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.65,
+      "requires_why": true,
+      "description": "edge — multi-intent: explanation + action (expect explanation to win)"
+    },
+    {
+      "id": "dc-907",
+      "query": "Penrith dispatch price",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.45,
+      "max_confidence": 0.8,
+      "description": "edge — suburb name (Penrith → NSW1)"
+    },
+    {
+      "id": "dc-908",
+      "query": "Gold Coast battery dispatch right now",
+      "region_hint": "QLD1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.6,
+      "requires_why": true,
+      "description": "edge — Gold Coast → QLD1, dispatch recommendation"
+    },
+    {
+      "id": "dc-909",
+      "query": "Canberra electricity price",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.55,
+      "description": "edge — Canberra maps to NSW1"
+    },
+    {
+      "id": "dc-910",
+      "query": "Adelaide spot price",
+      "region_hint": "SA1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "SA1"
+      ],
+      "min_confidence": 0.6,
+      "description": "edge — Adelaide maps to SA1"
+    },
+    {
+      "id": "dc-911",
+      "query": "Hobart dispatch price today",
+      "region_hint": "TAS1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "TAS1"
+      ],
+      "min_confidence": 0.6,
+      "description": "edge — Hobart maps to TAS1"
+    },
+    {
+      "id": "dc-912",
+      "query": "Melbourne energy price right now",
+      "region_hint": "VIC1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.6,
+      "description": "edge — Melbourne maps to VIC1"
+    },
+    {
+      "id": "dc-913",
+      "query": "Brisbane market price",
+      "region_hint": "QLD1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "QLD1"
+      ],
+      "min_confidence": 0.55,
+      "description": "edge — Brisbane maps to QLD1"
+    },
+    {
+      "id": "dc-914",
+      "query": "Summer 2023 NSW price events",
+      "region_hint": "NSW1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "edge — seasonal reference triggers retrospective"
+    },
+    {
+      "id": "dc-915",
+      "query": "Winter peak demand pattern for VIC",
+      "region_hint": "VIC1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "edge — winter seasonal pattern → retrospective"
+    },
+    {
+      "id": "dc-916",
+      "query": "Christmas Day price spike NSW historical",
+      "region_hint": "NSW1",
+      "expected_intent": "retrospective",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.65,
+      "requires_history": true,
+      "description": "edge — Christmas seasonal + historical → retrospective"
+    },
+    {
+      "id": "dc-917",
+      "query": "WA electricity prices in the context of the NEM",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.75,
+      "description": "edge — WA (SWIS) not in NEM"
+    },
+    {
+      "id": "dc-918",
+      "query": "What does an AEMO market notice mean for my dispatch?",
+      "region_hint": "NSW1",
+      "expected_intent": "explanation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.55,
+      "requires_why": true,
+      "description": "edge — AEMO notice interpretation (meta-ish but NEM-relevant)"
+    },
+    {
+      "id": "dc-919",
+      "query": "Should I sell my NSW battery asset to a competitor?",
+      "region_hint": "NSW1",
+      "expected_intent": "out_of_scope",
+      "min_confidence": 0.6,
+      "description": "edge — business asset decision, not dispatch"
+    },
+    {
+      "id": "dc-920",
+      "query": "12345",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.1,
+      "max_confidence": 0.75,
+      "description": "edge — numbers only, degenerate input"
+    },
+    {
+      "id": "dc-921",
+      "query": "NSW what",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.2,
+      "max_confidence": 0.8,
+      "description": "edge — incomplete partial query"
+    },
+    {
+      "id": "dc-922",
+      "query": "dispatch now",
+      "region_hint": "NSW1",
+      "expected_intent": "action_recommendation",
+      "expected_regions": [
+        "NSW1"
+      ],
+      "min_confidence": 0.5,
+      "max_confidence": 0.85,
+      "requires_why": true,
+      "description": "edge — terse action intent with no region"
+    },
+    {
+      "id": "dc-923",
+      "query": "is the prices different to other states? what is best to buy at victoria or perth?",
+      "region_hint": "NSW1",
+      "expected_intent": "lookup",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.6,
+      "description": "mixed NEM+non-NEM — VIC1 detected, Perth non-NEM, should answer NEM portion not full OOS"
+    },
+    {
+      "id": "dc-924",
+      "query": "Compare VIC and Perth energy prices",
+      "region_hint": "NSW1",
+      "expected_intent": "comparison",
+      "expected_regions": [
+        "VIC1"
+      ],
+      "min_confidence": 0.65,
+      "description": "mixed NEM+non-NEM — VIC1 valid, Perth SWIS, partial NEM answer"
+    },
+    {
+      "id": "ps-001",
+      "query": "Can I put solar panels on my house and export to the grid?",
+      "region_hint": "NSW1",
+      "expected_intent": "partial_scope",
+      "min_confidence": 0.5,
+      "note": "rooftop solar/feed-in tariff — NEM price answerable, FiT rate not"
+    },
+    {
+      "id": "eb-001",
+      "query": "What impact do RBA interest rate decisions have on new wind farm economics?",
+      "region_hint": "NSW1",
+      "expected_intent": "evidence_bridge",
+      "min_confidence": 0.4,
+      "note": "macro mechanism bridge — RBA rate vs capex-driven renewable LCOE"
+    },
+    {
+      "id": "gr-001",
+      "query": "What is the spot price in Western Australia?",
+      "region_hint": "NSW1",
+      "expected_intent": "geographic_redirect",
+      "min_confidence": 0.5,
+      "note": "WA is not part of the NEM — redirect to AEMO WEM"
+    }
+  ]
+}

@@ -867,3 +867,85 @@ def _parse_rooftop_forecast_text(text: str, out: dict) -> None:
             out[(region, dt)] = round(float(power_str), 2)
         except Exception:
             continue
+
+
+# ── DISPATCHOFFERTRK parser ───────────────────────────────────────────────────
+# Available immediately in NEMWeb DispatchIS 5-min reports — no confidentiality delay.
+# Shows WHEN a generator offer was last modified (OFFERDATE) per settlement period.
+# NLP signal: if OFFERDATE changes between dispatch intervals → rebid occurred.
+# Enables: 'was there a rebid in NSW at 6pm?' from live/recent data (no 30-day wait).
+
+_OFFERTRK_REQUIRED = {"SETTLEMENTDATE", "DUID", "PERIODID", "OFFERDATE"}
+
+
+def parse_dispatchoffertrk_content(content: bytes, raw_ref: str = "nemweb") -> list[dict[str, Any]]:
+    """Parse DISPATCHOFFERTRK content from a NEMWeb DispatchIS ZIP or CSV.
+
+    Returns list of dicts for upsert into offer_track table:
+      id, duid, settlement_date, period_id, offer_date, version_no,
+      energy_offer_date, raise_6s_offer_date, source, raw_ref
+    """
+    rows: list[dict[str, Any]] = []
+    for _name, text in _extract_archive_texts(content):
+        upper = text[:2000].upper()
+        if "DISPATCHOFFERTRK" not in upper and "OFFERDATE" not in upper:
+            continue
+        rows.extend(_parse_offertrk_text(text, raw_ref))
+    return rows
+
+
+def _parse_offertrk_text(text: str, raw_ref: str) -> list[dict[str, Any]]:
+    import uuid as _uuid_mod
+    reader = csv.reader(io.StringIO(text))
+    header: list[str] | None = None
+    rows: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+
+    for row in reader:
+        if not row:
+            continue
+        tag = row[0].strip().upper()
+        if tag == "C":
+            break
+        if tag == "I":
+            header = [c.strip().upper() for c in row]
+            continue
+        if tag != "D" or header is None:
+            continue
+        try:
+            rd = dict(zip(header, row))
+            duid = rd.get("DUID", "").strip().upper()
+            settlement_raw = rd.get("SETTLEMENTDATE", "").strip()
+            period_raw = rd.get("PERIODID", "").strip()
+            offer_raw = rd.get("OFFERDATE", "").strip()
+            if not (duid and settlement_raw and period_raw):
+                continue
+            settlement_dt = _parse_archive_dt(settlement_raw)
+            period_id = int(float(period_raw))
+            offer_dt = _parse_archive_dt(offer_raw) if offer_raw else None
+            version_raw = rd.get("VERSIONNO", "").strip()
+            version_no = int(float(version_raw)) if version_raw else None
+            e_offer_raw = rd.get("ENERGYOFFERDATE", "").strip()
+            r6_offer_raw = rd.get("RAISE6SECOFFERDATE", "").strip()
+            row_id = _uuid_mod.uuid5(
+                _uuid_mod.NAMESPACE_URL,
+                f"offertrk:{duid}:{settlement_dt.isoformat()}:{period_id}",
+            )
+            rows.append({
+                "id":                  str(row_id),
+                "duid":                duid,
+                "settlement_date":     settlement_dt,
+                "period_id":           period_id,
+                "offer_date":          offer_dt,
+                "version_no":          version_no,
+                "energy_offer_date":   _parse_archive_dt(e_offer_raw) if e_offer_raw else None,
+                "raise_6s_offer_date": _parse_archive_dt(r6_offer_raw) if r6_offer_raw else None,
+                "region":              None,
+                "source":              "DISPATCHOFFERTRK",
+                "raw_ref":             raw_ref,
+                "ingested_at":         now,
+            })
+        except Exception:
+            continue
+
+    return rows

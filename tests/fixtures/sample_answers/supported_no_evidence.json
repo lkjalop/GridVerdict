@@ -1,0 +1,13 @@
+{
+  "verdict": "SUPPORTED",
+  "action": "dispatch_now",
+  "confidence": 0.84,
+  "confidence_band": "high",
+  "as_of": "2026-05-23T04:30:00+00:00",
+  "why_plain_english": "Price is high.",
+  "evidence_refs": [],
+  "counterargument": "Could ease.",
+  "missing_data": [],
+  "disclaimer": "Simulation and decision-support only. Not financial advice. Not a market participant. Uses public AEMO/NEMWEB data.",
+  "trace_id": null
+}

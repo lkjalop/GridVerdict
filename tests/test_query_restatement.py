@@ -178,37 +178,24 @@ class TestAdversarialCritic:
 
     @pytest.mark.asyncio
     async def test_detects_routing_gap_and_suggests_fix(self):
-        """Critic returns has_actionable_suggestion()=True when answer misses sub-questions."""
+        """Deterministic coverage auditor: detects missing fuel sub-question.
+
+        The new deterministic-first design uses typed sub-question dicts
+        (not raw strings) matched against expected section keywords.
+        A 'fuel_source_comparison' sub-question with no fuel keywords in
+        the answer sections → gap detected → routing fix suggested.
+        """
         from app.engines.coverage_auditor import audit_coverage
 
-        mock_response = json.dumps({
-            "passes": False,
-            "gaps": ["User asked about fuel source but answer only shows price/demand"],
-            "suggested_output": "fuel_source_recommendation",
-            "reasoning": "The answer is a bare price lookup; fuel attribution was not addressed.",
-        })
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"message": {"content": mock_response}}
-        mock_resp.raise_for_status = MagicMock()
+        # Pass a typed sub-question dict (the format produced by _classify_sub_questions)
+        # with no fuel-related keywords in the answer sections.
+        result = await audit_coverage(
+            ["fuel_source_comparison"],   # typed sub-question type
+            [{"title": "Answer", "items": ["NSW1: $167/MWh, demand 8211 MW, headroom 2100 MW"]}],
+            "causal_explanation",
+        )
 
-        with patch("app.engines.coverage_auditor._settings") as mock_settings, \
-             patch("httpx.AsyncClient") as mock_client_cls:
-            mock_settings.decomposer_backend = "ollama"
-            mock_settings.ollama_base_url = "http://localhost:11434"
-            mock_settings.ollama_model = "qwen3:14b"
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_resp)
-            mock_client_cls.return_value = mock_client
-
-            result = await audit_coverage(
-                ["Which fuel type was the marginal generator?"],
-                [{"title": "Answer", "items": ["NSW1: $167/MWh, demand 8211 MW"]}],
-                "causal_explanation",
-            )
-
-        assert result.passes is False
+        assert result.passes is False, "Expected deterministic gap detection for missing fuel sub-question"
         assert result.suggested_output == "fuel_source_recommendation"
         assert result.has_actionable_suggestion()
 
