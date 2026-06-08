@@ -753,9 +753,19 @@ def _plan_future_date_forecast(
     _season_label = _season_map.get(_month_for_season, "Current season")
     _season_note = _season_notes.get(_season_label, "varies by weather")
 
-    # Use DB-derived percentiles when hist_dist is available — always more accurate
-    # than hardcoded ranges which don't reflect region or actual observed volatility.
-    if hist_dist and hist_dist.get("available") and hist_dist.get("p10") is not None:
+    # Use DB-derived percentiles only when the hist_dist covers the SAME season as the
+    # target date. hist_dist is fetched with include_season=True anchored to NOW, so if
+    # the target month is in a different season (e.g. asking about December in June),
+    # the DB percentiles are winter values being applied to a summer estimate — wrong.
+    # When seasons differ, the static seasonal profiles are more accurate.
+    _current_season = _season_map.get(datetime.now().month, "Unknown")
+    _hist_dist_season_matches = _target_month is None or _current_season == _season_label
+    if (
+        hist_dist
+        and hist_dist.get("available")
+        and hist_dist.get("p10") is not None
+        and _hist_dist_season_matches
+    ):
         _p10 = int(hist_dist["p10"])
         _p50 = int(hist_dist.get("median") or hist_dist.get("p50") or 60)
         _p90 = int(hist_dist["p90"])
@@ -768,7 +778,8 @@ def _plan_future_date_forecast(
             if _count else f"derived from {region} historical archive"
         )
     else:
-        # Fallback static profiles — replaced by DB data when archive is populated
+        # Static seasonal profiles — used when DB data is absent OR when the target
+        # month is in a different season from the current DB window (cross-season query).
         _static = {
             "Autumn":  ("$35–90",   "$20–50",  "$55–120"),
             "Winter":  ("$45–120",  "$30–60",  "$70–160"),
