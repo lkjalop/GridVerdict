@@ -322,6 +322,25 @@ async def _start_jobs() -> None:
         max_instances=1,
         coalesce=True,
     )
+    sched.add_job(
+        _job_dispatchconstraint_ingest,
+        trigger=IntervalTrigger(seconds=_settings.aemo_dispatch_poll_s),
+        id="dispatchconstraint_ingest",
+        name="AEMO DISPATCHCONSTRAINT → MarketDriverEvent ingest",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(timezone.utc),
+    )
+    sched.add_job(
+        _job_walkforward_eval,
+        trigger=CronTrigger(day_of_week="sun", hour=2, minute=0, timezone="UTC"),
+        id="walkforward_eval",
+        name="Weekly walk-forward evaluation + auto-promote best model",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
 
     sched.start()
     logger.info(
@@ -1194,3 +1213,226 @@ async def _calibrate_region(region: str) -> dict | None:
     except Exception as exc:
         logger.debug("Calibration region run failed for %s: %s", region, exc)
         return None
+
+
+async def _job_dispatchconstraint_ingest() -> None:
+    """Parse DISPATCHCONSTRAINT from the latest DispatchIS report into MarketDriverEvent.
+
+    DISPATCHCONSTRAINT records binding constraints and interconnector violations
+    that cause inter-regional price divergence. Ingesting these every 5 min
+    populates the `constraint_count` and `constraint_binding` features that the
+    LEAR/LNN models use — without this job the features are always 0.
+
+    Pulls the last-published DispatchIS ZIP from NEMWeb, parses the
+    DISPATCHCONSTRAINT table, and upserts into MarketDriverEvent.
+    Never raises — constraint data is supplementary, not critical-path.
+    """
+    _job_enter("dispatchconstraint_ingest")
+    try:
+        import hashlib as _hashlib
+        import io
+        import zipfile
+        import csv
+        import httpx
+        from datetime import datetime, timezone, timedelta
+        from app.db.session import db_session
+        from app.db.models import MarketDriverEvent
+
+        _DC_BASE = "https://nemweb.com.au/Reports/Current/DispatchIS_Reports/"
+        _UA = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
+
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0),
+            headers={"User-Agent": _UA},
+            follow_redirects=True,
+        ) as client:
+            idx_resp = await client.get(_DC_BASE)
+            idx_resp.raise_for_status()
+
+            import re as _re
+            zips = _re.findall(
+                r'href="(PUBLIC_DISPATCHIS_\d{12}_\d{14}\.zip)"',
+                idx_resp.text, _re.IGNORECASE,
+            )
+            if not zips:
+                logger.debug("DispatchIS: no ZIP files found in index")
+                _record_failure("dispatchconstraint_ingest", Exception("no ZIPs in index"))
+                return
+
+            latest_zip = sorted(zips)[-1]
+            zip_resp = await client.get(_DC_BASE + latest_zip)
+            zip_resp.raise_for_status()
+
+        # Parse DISPATCHCONSTRAINT rows
+        constraint_rows: list[dict] = []
+        try:
+            with zipfile.ZipFile(io.BytesIO(zip_resp.content)) as zf:
+                for name in zf.namelist():
+                    if name.upper().endswith(".CSV"):
+                        text = zf.read(name).decode("utf-8", errors="replace")
+                        reader = csv.reader(io.StringIO(text))
+                        header: list[str] | None = None
+                        for row in reader:
+                            if not row:
+                                continue
+                            tag = row[0].strip().upper()
+                            if tag == "I" and any("CONSTRAINTID" in c.upper() for c in row):
+                                header = [c.strip().upper() for c in row]
+                                continue
+                            if tag != "D" or header is None:
+                                continue
+                            rd = dict(zip(header, row))
+                            constraint_rows.append(rd)
+        except Exception as exc:
+            logger.debug("DispatchIS ZIP parse failed: %s", exc)
+
+        if not constraint_rows:
+            _record_success("dispatchconstraint_ingest")
+            return
+
+        now = datetime.now(timezone.utc)
+        db_rows = []
+        for rd in constraint_rows:
+            try:
+                region = rd.get("REGIONID", "").strip().upper() or "NEM"
+                constraint_id = rd.get("CONSTRAINTID", "").strip()
+                rhs = rd.get("RHS", "").strip()
+                marginal = rd.get("MARGINALVALUE", "").strip()
+                violationdeg = rd.get("VIOLATIONDEGREE", "").strip()
+                run_no = rd.get("RUNNO", "").strip()
+                interval_str = rd.get("SETTLEMENTDATE", rd.get("INTERVAL_DATETIME", "")).strip()
+
+                try:
+                    interval_dt = datetime.fromisoformat(interval_str.replace("T", " ").split(".")[0])
+                    if interval_dt.tzinfo is None:
+                        interval_dt = interval_dt.replace(tzinfo=timezone.utc)
+                except Exception:
+                    interval_dt = now
+
+                row_id = _hashlib.sha256(
+                    f"dc-{region}-{constraint_id}-{interval_dt.isoformat()}".encode()
+                ).hexdigest()[:36]
+
+                db_rows.append(MarketDriverEvent(
+                    id=row_id,
+                    region=region,
+                    source="AEMO_DISPATCHCONSTRAINT",
+                    driver_type="CONSTRAINT_BINDING",
+                    element_id=constraint_id[:120],
+                    valid_time=interval_dt,
+                    system_time=now,
+                    values={
+                        "rhs": rhs,
+                        "marginal_value": marginal,
+                        "violation_degree": violationdeg,
+                        "run_no": run_no,
+                    },
+                    raw_ref=(_DC_BASE + latest_zip)[:200],
+                ))
+            except Exception:
+                continue
+
+        if db_rows:
+            async with db_session() as session:
+                for row in db_rows:
+                    await session.merge(row)
+                await session.commit()
+            logger.debug(
+                "DispatchIS: persisted %d constraint rows from %s", len(db_rows), latest_zip
+            )
+
+        _record_success("dispatchconstraint_ingest")
+    except Exception as exc:
+        _record_failure("dispatchconstraint_ingest", exc)
+        logger.debug("DispatchConstraint ingest failed (non-fatal): %s: %s", type(exc).__name__, exc)
+    finally:
+        _job_exit("dispatchconstraint_ingest")
+
+
+async def _job_walkforward_eval() -> None:
+    """Weekly walk-forward evaluation — full 7-day backtest per region.
+
+    Runs every Sunday at 02:00 UTC. Uses the full model suite (LEAR, QRA, GBM, LNN)
+    over a 7-day lookback with 30-min step intervals. Results are stored in the
+    harness eval registry. Models with skill improvement >2% over persistence are
+    auto-promoted to primary status via a promotion flag in the cache.
+
+    This is separate from the 6-hourly _job_calibration_update (3-day fast backtest)
+    — this is the authoritative weekly evaluation used for model governance.
+    """
+    _job_enter("walkforward_eval")
+    try:
+        from app.data.cache import get_cache
+        from app.engines.forecasting.evaluation.harness import store_eval_result
+
+        regions = ["NSW1", "VIC1", "QLD1", "SA1", "TAS1"]
+        cache = get_cache()
+        promoted: list[str] = []
+        any_ok = False
+
+        for region in regions:
+            try:
+                from app.engines.backtest import run_region_backtest
+                report = await run_region_backtest(
+                    region=region,
+                    lookback_days=7,
+                    horizon_intervals=6,
+                    step_intervals=6,   # 30-min steps for thorough coverage
+                    include_lnn=True,
+                    fast=False,
+                )
+                calibration_rows = []
+                for score in report.scores:
+                    skill = score.skill_vs.get("persistence", 0.0)
+                    row = {
+                        "model": score.model_name,
+                        "crps": round(score.crps, 4),
+                        "pinball": round(score.pinball, 4),
+                        "spike_recall": round(score.spike_recall, 4),
+                        "skill_vs_persistence": round(skill, 4),
+                        "n_origins": report.n_origins,
+                        "horizon_min": report.horizon_min,
+                    }
+                    calibration_rows.append(row)
+
+                    # Auto-promote models that beat persistence by >2%
+                    if skill > 0.02:
+                        promo_key = f"promoted_model_{region}"
+                        existing = await cache.get(promo_key)
+                        if not isinstance(existing, dict) or existing.get("crps", 999) > score.crps:
+                            await cache.set(promo_key, {
+                                "model": score.model_name,
+                                "crps": round(score.crps, 4),
+                                "skill": round(skill, 4),
+                                "evaluated_at": datetime.now(timezone.utc).isoformat(),
+                            })
+                            promoted.append(f"{region}/{score.model_name}")
+
+                store_eval_result(region, calibration_rows)
+                await cache.set(f"walkforward_eval_{region}", {
+                    "region": region,
+                    "evaluated_at": datetime.now(timezone.utc).isoformat(),
+                    "lookback_days": 7,
+                    "scores": calibration_rows,
+                })
+                any_ok = True
+            except Exception as exc:
+                logger.debug("Walk-forward eval failed for %s: %s: %s", region, type(exc).__name__, exc)
+
+        if promoted:
+            logger.info("Walk-forward eval: promoted models — %s", ", ".join(promoted))
+            await _try_publish("model_promoted", {"promoted": promoted})
+
+        if any_ok:
+            _record_success("walkforward_eval")
+        else:
+            _record_failure("walkforward_eval", Exception("no region produced eval output"))
+    except Exception as exc:
+        _record_failure("walkforward_eval", exc)
+        logger.warning("Walk-forward eval job failed: %s: %s", type(exc).__name__, exc)
+    finally:
+        _job_exit("walkforward_eval")

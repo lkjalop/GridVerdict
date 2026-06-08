@@ -256,6 +256,8 @@ class TestScatterGatherParallelism:
             patch("app.agents.scatter_gather._task_forecast", new=AsyncMock(side_effect=_slow_none)),
             patch("app.agents.scatter_gather._task_predispatch", new=AsyncMock(side_effect=_slow)),
             patch("app.agents.scatter_gather._task_news_sentiment", new=AsyncMock(side_effect=_slow)),
+            patch("app.agents.scatter_gather._task_gas_price", new=AsyncMock(side_effect=_slow_none)),
+            patch("app.agents.scatter_gather._task_st_pasa", new=AsyncMock(side_effect=_slow_none)),
         ):
             import time
             t0 = time.monotonic()

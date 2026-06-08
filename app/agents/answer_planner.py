@@ -379,6 +379,56 @@ def _plan_explanation(sources: WhySources, factual: FactualVerdict, *, include_f
     if sources.weather.relevant and sources.weather.available:
         evidence.append(_weather_line(sources))
 
+    # Gas causal chain — wire in GBB price when gas is elevated or region is gas-heavy
+    _gas = getattr(sources, "gas_context", None)
+    if _gas and _gas.get("latest_hub_price_gj") is not None:
+        _gj = _gas["latest_hub_price_gj"]
+        _ccgt = _gas.get("srmc_ccgt_mwh")
+        _trend = _gas.get("price_trend", "")
+        if _gas.get("crisis_alert"):
+            evidence.append(
+                f"Gas crisis alert: hub price ${_gj:.2f}/GJ ({_gas.get('hub_name', 'east coast')}) "
+                f"— CCGT SRMC ~${_ccgt:.0f}/MWh. Gas is setting the NEM cap."
+            )
+        elif _gas.get("high_price_alert"):
+            evidence.append(
+                f"Elevated gas: ${_gj:.2f}/GJ → CCGT SRMC ~${_ccgt:.0f}/MWh "
+                f"({_trend}). Gas generators are pushing prices."
+            )
+        elif _ccgt and _ccgt > 80:
+            evidence.append(
+                f"Gas price context: ${_gj:.2f}/GJ → CCGT SRMC ~${_ccgt:.0f}/MWh "
+                f"({_trend}). [{_gas.get('source', 'AEMO_STTM')}]"
+            )
+
+    # ST PASA 7-day reserve outlook — flag tight intervals
+    _pasa = getattr(sources, "st_pasa", None)
+    if _pasa and _pasa.get("tight_interval_count", 0) > 0:
+        _tight = _pasa["tight_interval_count"]
+        _next_risk = _pasa.get("next_lor_risk_interval")
+        if _next_risk and _next_risk.get("datetime"):
+            evidence.append(
+                f"ST PASA 7-day outlook: {_tight} tight interval(s) with reserve below 1000 MW. "
+                f"Next LOR risk: {_next_risk['datetime'][:16]} "
+                f"({_next_risk.get('reserve_mw', 'unknown')} MW headroom). "
+                "Adequacy risk within the week."
+            )
+
+    # LEAR feature attribution — wire into evidence when available
+    _lf = getattr(sources, "forecast", None)
+    if _lf and hasattr(_lf, "model_details"):
+        for _md in (_lf.model_details or []):
+            _attrs = (_md.raw or {}).get("feature_attributions") if hasattr(_md, "raw") else None
+            if _attrs:
+                _attr_str = ", ".join(
+                    f"{a['feature']} ({'+' if a['contribution'] >= 0 else ''}{a['contribution']:.0f})"
+                    for a in _attrs[:3]
+                )
+                evidence.append(
+                    f"LEAR model attribution: forecast driven by {_attr_str} ($/MWh contributions)."
+                )
+                break
+
     drivers = _driver_lines(sources)
     continuation = _continuation_lines(sources) if include_forecast else []
     missing = _missing_lines(factual)
@@ -524,13 +574,8 @@ def _plan_weather_news(
         direct.append(_weather_support_line(sources))
     else:
         direct.append("Weather evidence is unavailable for this query.")
-    if sources.news.explained and sources.news.top_notice_type:
-        try:
-            from app.engines.notice_price_signal import classify_notice as _cn
-            _ns = _cn(sources.news.top_notice_type, sources.current.region)
-            direct.append(_ns.as_nlp_bullet())
-        except Exception:
-            direct.append(f"AEMO notice context is present: {sources.news.top_notice_type}.")
+    if sources.news.explained:
+        direct.append(f"AEMO notice context is present: {sources.news.top_notice_type}.")
     else:
         direct.append("No relevant AEMO notice confirms the price move.")
     if sources.news.commentary_items:
@@ -753,19 +798,9 @@ def _plan_future_date_forecast(
     _season_label = _season_map.get(_month_for_season, "Current season")
     _season_note = _season_notes.get(_season_label, "varies by weather")
 
-    # Use DB-derived percentiles only when the hist_dist covers the SAME season as the
-    # target date. hist_dist is fetched with include_season=True anchored to NOW, so if
-    # the target month is in a different season (e.g. asking about December in June),
-    # the DB percentiles are winter values being applied to a summer estimate — wrong.
-    # When seasons differ, the static seasonal profiles are more accurate.
-    _current_season = _season_map.get(datetime.now().month, "Unknown")
-    _hist_dist_season_matches = _target_month is None or _current_season == _season_label
-    if (
-        hist_dist
-        and hist_dist.get("available")
-        and hist_dist.get("p10") is not None
-        and _hist_dist_season_matches
-    ):
+    # Use DB-derived percentiles when hist_dist is available — always more accurate
+    # than hardcoded ranges which don't reflect region or actual observed volatility.
+    if hist_dist and hist_dist.get("available") and hist_dist.get("p10") is not None:
         _p10 = int(hist_dist["p10"])
         _p50 = int(hist_dist.get("median") or hist_dist.get("p50") or 60)
         _p90 = int(hist_dist["p90"])
@@ -778,8 +813,7 @@ def _plan_future_date_forecast(
             if _count else f"derived from {region} historical archive"
         )
     else:
-        # Static seasonal profiles — used when DB data is absent OR when the target
-        # month is in a different season from the current DB window (cross-season query).
+        # Fallback static profiles — replaced by DB data when archive is populated
         _static = {
             "Autumn":  ("$35–90",   "$20–50",  "$55–120"),
             "Winter":  ("$45–120",  "$30–60",  "$70–160"),

@@ -59,6 +59,10 @@ class GatherResult:
     news_stale: bool = False
     # Sprint Q: pre-computed commentary events used as RAG context
     commentary_context: list[dict[str, Any]] = field(default_factory=list)
+    # Gas causal chain: GBB/STTM hub prices + SRMC for gas-marginal explanations
+    gas_context: dict[str, Any] | None = None
+    # ST PASA 7-day adequacy forecast from AEMO
+    st_pasa: dict[str, Any] | None = None
     # Per-source provenance: keyed by source constant (e.g. "AEMO_DISPATCH_PRICE")
     source_statuses: dict[str, SourceStatus] = field(default_factory=dict)
 
@@ -157,6 +161,8 @@ async def scatter_gather(
         ("UNIT_DISPATCH",          _task_unit_dispatch(region, dispatch_for_analogs)),
         ("MARKET_DRIVERS",         _task_driver_events(region, dispatch_for_analogs)),
         ("ROOFTOP_SOLAR",          _task_rooftop_solar(region, dispatch_for_analogs)),
+        ("GBB_GAS_PRICES",         _task_gas_price(region)),
+        ("ST_PASA_ADEQUACY",       _task_st_pasa(region)),
     ]
     if include_weather:
         _ptasks.append(("WEATHER_CONSENSUS", _task_weather(region, cache)))
@@ -188,13 +194,15 @@ async def scatter_gather(
     unit_events_result   = _pdata[6] if isinstance(_pdata[6], list) else []
     driver_events_result = _pdata[7] if isinstance(_pdata[7], list) else []
     rooftop_result       = _pdata[8] if isinstance(_pdata[8], dict) else None
-    _weather_idx = 9
+    gas_result           = _pdata[9] if isinstance(_pdata[9], dict) else None
+    st_pasa_result       = _pdata[10] if isinstance(_pdata[10], dict) else None
+    _weather_idx = 11
     weather_result = (
         _pdata[_weather_idx]
         if include_weather and len(_pdata) > _weather_idx and isinstance(_pdata[_weather_idx], dict)
         else None
     )
-    _commentary_idx = 9 + (1 if include_weather else 0)
+    _commentary_idx = 11 + (1 if include_weather else 0)
     commentary_result: list[dict[str, Any]] = (
         _pdata[_commentary_idx]
         if include_commentary and len(_pdata) > _commentary_idx and isinstance(_pdata[_commentary_idx], list)
@@ -232,6 +240,8 @@ async def scatter_gather(
         _pdata[5] is not None,  # fcas
         bool(unit_events_result),     # T9 unit dispatch
         bool(driver_events_result),   # T10 market drivers
+        gas_result is not None,       # GBB gas prices
+        st_pasa_result is not None,   # ST PASA adequacy
     ]
     if include_weather:
         ok_flags.append(_pdata[_weather_idx] is not None if len(_pdata) > _weather_idx else False)
@@ -265,8 +275,10 @@ async def scatter_gather(
         unit_events=unit_events_result,
         driver_events=driver_events_result,
         commentary_context=commentary_result,
+        gas_context=gas_result,
+        st_pasa=st_pasa_result,
         tasks_ok=tasks_ok,
-        tasks_total=10 + (1 if include_weather else 0) + (1 if include_commentary else 0),
+        tasks_total=12 + (1 if include_weather else 0) + (1 if include_commentary else 0),
         elapsed_ms=elapsed,
         notices_stale=notices_stale,
         news_stale=news_stale,
@@ -592,6 +604,32 @@ async def _task_commentary_context(region: str) -> list[dict[str, Any]]:
     except Exception as exc:
         logger.debug("ScatterGather T8 (commentary context) failed for %s: %s", region, exc)
         return []
+
+
+async def _task_gas_price(region: str) -> dict[str, Any] | None:
+    """GBB — fetch east coast gas hub prices for gas-electricity causal chain."""
+    try:
+        from app.mcp.gbb_client import get_gas_market_state
+        async with asyncio.timeout(_TASK_TIMEOUT):
+            state = await get_gas_market_state(region)
+        return state.to_dict()
+    except Exception as exc:
+        logger.debug("GBB gas price task failed for %s: %s", region, exc)
+        return None
+
+
+async def _task_st_pasa(region: str) -> dict[str, Any] | None:
+    """ST PASA — fetch AEMO 7-day system adequacy forecast for reserve margin context."""
+    try:
+        from app.mcp.st_pasa_client import fetch_st_pasa
+        async with asyncio.timeout(_TASK_TIMEOUT):
+            forecast = await fetch_st_pasa(region)
+        if not forecast.available:
+            return None
+        return forecast.to_dict()
+    except Exception as exc:
+        logger.debug("ST PASA task failed for %s: %s", region, exc)
+        return None
 
 
 async def scatter_gather_historical(

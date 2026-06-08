@@ -103,3 +103,55 @@ class LTCModel(nn.Module):
         xp = torch.cat([pad, x], dim=0)
         windows = torch.stack([xp[i: i + seq_len] for i in range(n)])
         return windows  # (n, seq_len, d)
+
+    def integrated_gradients(
+        self,
+        seq: "torch.Tensor",
+        head_module: "nn.Module",
+        target_quantile_idx: int = 1,
+        baseline: "torch.Tensor | None" = None,
+        steps: int = 50,
+    ) -> "torch.Tensor":
+        """Integrated Gradients attribution for the LTC sequence model.
+
+        Standard SHAP/TreeSHAP does not work for ODE-based recurrent networks.
+        IG works for any differentiable PyTorch model: linearly interpolate from
+        baseline to input in `steps` steps, accumulate ∂output/∂input at each
+        step via autograd, then scale by (input - baseline).
+
+        Args:
+            seq:                (1, seq_len, input_size) input sequence tensor
+            head_module:        nn.Module that maps h_final → quantile outputs
+            target_quantile_idx: index into head output to differentiate (1 = P50)
+            baseline:           reference input (zeros if None)
+            steps:              Riemann approximation steps (50 is sufficient)
+
+        Returns:
+            attribution: (seq_len, input_size) tensor — which feature at which
+                         timestep drove the prediction. Positive = pushed price up.
+
+        NLP usage: "LNN forecast $167 driven by: notice_lor_active t-4 (+$23),
+                    demand_ramp t-1 (+$18), headroom t-2 (+$12), renew_frac (+$8)"
+        """
+        import torch
+        if baseline is None:
+            baseline = torch.zeros_like(seq)
+
+        self.eval()
+        head_module.eval()
+
+        alphas = torch.linspace(0.0, 1.0, steps, device=seq.device)
+        grad_accum = torch.zeros_like(seq[0])  # (seq_len, input_size)
+
+        for alpha in alphas:
+            inp = (baseline + alpha * (seq - baseline)).detach().requires_grad_(True)
+            h = self.forward(inp)
+            out = head_module(h)
+            target = out[0, target_quantile_idx]
+            target.backward()
+            if inp.grad is not None:
+                grad_accum = grad_accum + inp.grad[0].detach()
+
+        avg_grad = grad_accum / steps
+        ig = (seq[0] - baseline[0]) * avg_grad  # (seq_len, input_size)
+        return ig

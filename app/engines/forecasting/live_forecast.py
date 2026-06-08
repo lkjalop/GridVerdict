@@ -270,10 +270,19 @@ def _run_sync(
                 except Exception as exc:
                     logger.debug("Spike prob prediction failed for %s/%s: %s", region, name, exc)
 
+            # Per-sample feature attribution for LEAR (gives NLP explainability)
+            feature_attributions: list[tuple[str, float]] = []
+            if hasattr(model, "feature_attribution") and X_future.shape[0] > 0:
+                try:
+                    feature_attributions = model.feature_attribution(X_future[0], top_n=5)
+                except Exception as exc:
+                    logger.debug("LEAR feature attribution failed for %s/%s: %s", region, name, exc)
+
             forecasts.append(
                 _forecast_to_dict(name, fc, "trained on persisted dispatch history",
                                   calibrated=calibrated, q_hat=q_hat,
-                                  spike_probs=spike_probs, spike_probs_series=spike_probs_series)
+                                  spike_probs=spike_probs, spike_probs_series=spike_probs_series,
+                                  feature_attributions=feature_attributions)
             )
         except Exception as exc:
             errors.append({"model": name, "error": str(exc)})
@@ -526,6 +535,7 @@ def _forecast_to_dict(
     q_hat: float = 0.0,
     spike_probs: dict | None = None,
     spike_probs_series: dict | None = None,
+    feature_attributions: list[tuple[str, float]] | None = None,
 ) -> dict[str, Any]:
     q_idx = {float(q): i for i, q in enumerate(fc.quantiles)}
     p10_raw = fc.values[:, q_idx[0.1]]
@@ -555,6 +565,11 @@ def _forecast_to_dict(
         d["spike_probs"] = spike_probs
     if spike_probs_series is not None:
         d["spike_probs_series"] = spike_probs_series
+    if feature_attributions:
+        d["feature_attributions"] = [
+            {"feature": name, "contribution": round(val, 2)}
+            for name, val in feature_attributions
+        ]
     return d
 
 

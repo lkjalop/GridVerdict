@@ -243,6 +243,41 @@ class LEARModel(ForecastModel):
             for rank, i in enumerate(indices)
         ]
 
+    def feature_attribution(
+        self, X_row: np.ndarray, top_n: int = 5
+    ) -> list[tuple[str, float]]:
+        """Per-sample linear attribution: contribution_i = coef_i × x_i (scaled).
+
+        Returns a list of (feature_name, contribution_$/MWh) sorted by |contribution|.
+        Use for NLP bullets: "Forecast driven by ar_lag_1 (+$42), demand_mw (+$18)..."
+        """
+        if not self._models or self._scaler is None or self._last_y is None:
+            return []
+        p50_idx = next(
+            (i for i, q in enumerate(self.quantiles) if abs(float(q) - 0.5) < 0.01),
+            None,
+        )
+        if p50_idx is None or p50_idx >= len(self._models):
+            return []
+        m = self._models[p50_idx]
+        if m is None or not hasattr(m, "coef_"):
+            return []
+        X_ar = _build_ar_features_predict(
+            X_row.reshape(1, -1).astype(np.float64),
+            self._last_y[-max(_AR_LAGS):].astype(np.float64),
+        )
+        X_scaled = X_ar.copy()
+        scaler, active = self._scaler
+        if active.any():
+            X_scaled[:, active] = scaler.transform(X_ar[:, active])
+        contribs = m.coef_ * X_scaled[0]
+        names = self._feature_names
+        pairs = [
+            (names[i] if i < len(names) else f"feat_{i}", float(contribs[i]))
+            for i in range(len(contribs))
+        ]
+        return sorted(pairs, key=lambda x: abs(x[1]), reverse=True)[:top_n]
+
     def predict_quantiles(
         self, X: np.ndarray, target_times: Sequence[datetime]
     ) -> QuantileForecast:
