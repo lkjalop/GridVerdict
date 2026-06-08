@@ -152,6 +152,8 @@ class WhySources:
     gas_context: dict[str, Any] | None = None
     # ST PASA 7-day adequacy: {tight_interval_count, next_lor_risk_interval, ...}
     st_pasa: dict[str, Any] | None = None
+    # Site-level solar irradiance + wind speed at generator locations (OpenMeteo)
+    site_weather: dict[str, Any] | None = None
 
 
 @dataclass
@@ -574,6 +576,7 @@ def assemble_why_sources(
     rooftop_solar = getattr(gather, "rooftop_solar", None) or None
     gas_context = getattr(gather, "gas_context", None) or None
     st_pasa = getattr(gather, "st_pasa", None) or None
+    site_weather = getattr(gather, "site_weather", None) or None
 
     return WhySources(
         decomp=decomp,
@@ -590,4 +593,5 @@ def assemble_why_sources(
         rooftop_solar=rooftop_solar,
         gas_context=gas_context,
         st_pasa=st_pasa,
+        site_weather=site_weather,
     )

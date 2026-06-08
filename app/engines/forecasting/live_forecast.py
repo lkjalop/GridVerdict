@@ -270,13 +270,18 @@ def _run_sync(
                 except Exception as exc:
                     logger.debug("Spike prob prediction failed for %s/%s: %s", region, name, exc)
 
-            # Per-sample feature attribution for LEAR (gives NLP explainability)
+            # Per-sample feature attribution — LEAR uses linear coef×x; LNN uses IG
             feature_attributions: list[tuple[str, float]] = []
             if hasattr(model, "feature_attribution") and X_future.shape[0] > 0:
                 try:
                     feature_attributions = model.feature_attribution(X_future[0], top_n=5)
                 except Exception as exc:
                     logger.debug("LEAR feature attribution failed for %s/%s: %s", region, name, exc)
+            elif hasattr(model, "integrated_gradients") and X_future.shape[0] > 0:
+                try:
+                    feature_attributions = model.integrated_gradients(X_future[0])
+                except Exception as exc:
+                    logger.debug("LNN IG attribution failed for %s/%s: %s", region, name, exc)
 
             forecasts.append(
                 _forecast_to_dict(name, fc, "trained on persisted dispatch history",

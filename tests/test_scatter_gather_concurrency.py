@@ -153,6 +153,12 @@ class TestScatterGatherTimeout:
                   new=AsyncMock(return_value=[])),
             patch("app.agents.scatter_gather._task_news_sentiment",
                   new=AsyncMock(return_value=[])),
+            patch("app.agents.scatter_gather._task_gas_price",
+                  new=AsyncMock(return_value=None)),
+            patch("app.agents.scatter_gather._task_st_pasa",
+                  new=AsyncMock(return_value=None)),
+            patch("app.agents.scatter_gather._task_site_weather",
+                  new=AsyncMock(return_value=None)),
         ):
             result = await scatter_gather("NSW1", client, cache)
 
@@ -258,6 +264,7 @@ class TestScatterGatherParallelism:
             patch("app.agents.scatter_gather._task_news_sentiment", new=AsyncMock(side_effect=_slow)),
             patch("app.agents.scatter_gather._task_gas_price", new=AsyncMock(side_effect=_slow_none)),
             patch("app.agents.scatter_gather._task_st_pasa", new=AsyncMock(side_effect=_slow_none)),
+            patch("app.agents.scatter_gather._task_site_weather", new=AsyncMock(side_effect=_slow_none)),
         ):
             import time
             t0 = time.monotonic()

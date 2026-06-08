@@ -574,8 +574,13 @@ def _plan_weather_news(
         direct.append(_weather_support_line(sources))
     else:
         direct.append("Weather evidence is unavailable for this query.")
-    if sources.news.explained:
-        direct.append(f"AEMO notice context is present: {sources.news.top_notice_type}.")
+    if sources.news.explained and sources.news.top_notice_type:
+        try:
+            from app.engines.notice_price_signal import classify_notice as _cn
+            _ns = _cn(sources.news.top_notice_type, sources.current.region)
+            direct.append(_ns.as_nlp_bullet())
+        except Exception:
+            direct.append(f"AEMO notice context is present: {sources.news.top_notice_type}.")
     else:
         direct.append("No relevant AEMO notice confirms the price move.")
     if sources.news.commentary_items:
@@ -708,6 +713,22 @@ def _plan_price_fluctuation(
     if fuel_line:
         evidence.append(fuel_line)
 
+    # Gas causal chain in price fluctuation context
+    _gas = getattr(sources, "gas_context", None)
+    if _gas and _gas.get("latest_hub_price_gj") is not None:
+        _gj = _gas["latest_hub_price_gj"]
+        _ccgt = _gas.get("srmc_ccgt_mwh")
+        if _gas.get("crisis_alert") or _gas.get("high_price_alert"):
+            evidence.append(
+                f"Gas alert: ${_gj:.2f}/GJ → CCGT SRMC ~${_ccgt:.0f}/MWh — "
+                f"gas may be the marginal setter driving this price move."
+            )
+        elif _ccgt and _ccgt > 80:
+            evidence.append(
+                f"Gas context: ${_gj:.2f}/GJ → CCGT SRMC ~${_ccgt:.0f}/MWh "
+                f"({_gas.get('price_trend', '')}). [{_gas.get('source', 'AEMO_STTM')}]"
+            )
+
     drivers = _driver_lines(sources)
     fuel_reason = _fuel_reason_line(fuel_mix)
     if fuel_reason:
@@ -752,16 +773,16 @@ def _plan_future_date_forecast(
     query = (sources.decomp.raw_query or "").lower()
     f = sources.forecast
 
-    # Extract target date label from query
+    # Extract target date label from query; day number is optional
     _date_match = _re.search(
         r'\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)?\s*'
-        r'(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})',
+        r'(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{1,2}))?',
         query, _re.I
     )
     if _date_match:
         _month_name = _date_match.group(1).capitalize()
         _day_num = _date_match.group(2)
-        date_label = f"{_month_name} {_day_num}"
+        date_label = f"{_month_name} {_day_num}" if _day_num else _month_name
         _target_month = _date_match.group(1).lower()
     elif "next week" in query:
         date_label = "next week"
@@ -798,9 +819,19 @@ def _plan_future_date_forecast(
     _season_label = _season_map.get(_month_for_season, "Current season")
     _season_note = _season_notes.get(_season_label, "varies by weather")
 
-    # Use DB-derived percentiles when hist_dist is available — always more accurate
-    # than hardcoded ranges which don't reflect region or actual observed volatility.
-    if hist_dist and hist_dist.get("available") and hist_dist.get("p10") is not None:
+    # Use DB-derived percentiles only when hist_dist covers the SAME season as the
+    # target date. hist_dist is fetched with include_season=True anchored to NOW, so if
+    # the target month is in a different season (e.g. asking about December in June),
+    # the DB percentiles are winter values being applied to a summer estimate — wrong.
+    # When seasons differ, the static seasonal profiles are more accurate.
+    _current_season = _season_map.get(datetime.now().month, "Unknown")
+    _hist_dist_season_matches = _target_month is None or _current_season == _season_label
+    if (
+        hist_dist
+        and hist_dist.get("available")
+        and hist_dist.get("p10") is not None
+        and _hist_dist_season_matches
+    ):
         _p10 = int(hist_dist["p10"])
         _p50 = int(hist_dist.get("median") or hist_dist.get("p50") or 60)
         _p90 = int(hist_dist["p90"])
@@ -813,7 +844,8 @@ def _plan_future_date_forecast(
             if _count else f"derived from {region} historical archive"
         )
     else:
-        # Fallback static profiles — replaced by DB data when archive is populated
+        # Static seasonal profiles — used when DB data is absent OR when the target
+        # month is in a different season from the current DB window (cross-season query).
         _static = {
             "Autumn":  ("$35–90",   "$20–50",  "$55–120"),
             "Winter":  ("$45–120",  "$30–60",  "$70–160"),
@@ -1299,6 +1331,30 @@ def _plan_fuel_source(
             1,
             "Historical price distribution not available for this window (< 5 matching archive intervals).",
         )
+    # Gas causal chain — critical for fuel-source questions (gas SRMC sets spot ~40% peak hours)
+    _gas = getattr(sources, "gas_context", None)
+    if _gas and _gas.get("latest_hub_price_gj") is not None:
+        _gj = _gas["latest_hub_price_gj"]
+        _ccgt = _gas.get("srmc_ccgt_mwh")
+        _ocgt = _gas.get("srmc_ocgt_mwh")
+        _hub = _gas.get("hub_name", "east coast")
+        _trend = _gas.get("price_trend", "")
+        if _gas.get("crisis_alert"):
+            evidence.append(
+                f"Gas crisis ({_hub}): ${_gj:.2f}/GJ → CCGT SRMC ${_ccgt:.0f}/MWh, "
+                f"OCGT ${_ocgt:.0f}/MWh. Gas is likely the marginal setter at this price."
+            )
+        elif _gas.get("high_price_alert"):
+            evidence.append(
+                f"Elevated gas ({_hub}): ${_gj:.2f}/GJ ({_trend}) → CCGT SRMC ${_ccgt:.0f}/MWh. "
+                "Gas generators enter the merit order before coal at peak demand."
+            )
+        else:
+            evidence.append(
+                f"Gas ({_hub}): ${_gj:.2f}/GJ → CCGT SRMC ~${_ccgt:.0f}/MWh, "
+                f"OCGT peaker ~${_ocgt:.0f}/MWh. [{_gas.get('source', 'AEMO_STTM')}]"
+            )
+
     for note in (rec.get("notes") or [])[:2]:
         evidence.append(str(note))
     for fuel in requested[:3]:

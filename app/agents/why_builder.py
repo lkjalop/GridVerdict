@@ -243,6 +243,63 @@ def build_why(sources: WhySources) -> WhyOutput:
                 "enter the merit order earlier, supporting higher spot prices."
             )
 
+    # Gas causal chain — wire when gas hub price data is available
+    gas = getattr(sources, "gas_context", None)
+    if gas and gas.get("latest_hub_price_gj") is not None:
+        _gj = gas["latest_hub_price_gj"]
+        _ccgt = gas.get("srmc_ccgt_mwh")
+        _ocgt = gas.get("srmc_ocgt_mwh")
+        _hub = gas.get("hub_name", "east coast hub")
+        _trend = gas.get("price_trend", "unknown")
+        _source_label = gas.get("source", "AEMO_STTM")
+        if gas.get("crisis_alert"):
+            parts.append(
+                f"Gas crisis: {_hub} price is ${_gj:.2f}/GJ — CCGT SRMC ~${_ccgt:.0f}/MWh, "
+                f"OCGT peaker SRMC ~${_ocgt:.0f}/MWh. Gas-fired generation is setting the NEM "
+                "cap. This replicates the 2022 LNG export-parity dynamic: JKM → domestic gas "
+                "→ SRMC spike → NEM spot follows."
+            )
+        elif gas.get("high_price_alert"):
+            parts.append(
+                f"Elevated gas ({_hub}): ${_gj:.2f}/GJ ({_trend}) → CCGT SRMC ~${_ccgt:.0f}/MWh. "
+                "Gas generators are entering the merit order earlier than normal and contributing to "
+                "above-average spot prices."
+            )
+        elif _ccgt and _ccgt > 60.0:
+            parts.append(
+                f"Gas context ({_source_label}): {_hub} hub at ${_gj:.2f}/GJ → "
+                f"CCGT SRMC ~${_ccgt:.0f}/MWh, OCGT ~${_ocgt:.0f}/MWh ({_trend})."
+            )
+        evidence_refs.append(EvidenceRefSchema(
+            source=_source_label,
+            region=c.region,
+            interval=c.valid_time,
+            field="gas_hub_price_gj",
+            value=float(_gj),
+            raw_ref=gas.get("raw_ref", "AEMO_STTM"),
+        ))
+    else:
+        missing_data.append("gas_hub_price")
+
+    # Site-level solar/wind from OpenMeteo
+    site_wx = getattr(sources, "site_weather", None)
+    if site_wx and site_wx.get("site_count", 0) > 0:
+        _rad = site_wx.get("avg_radiation_wm2")
+        _wind = site_wx.get("avg_wind_kmh")
+        if site_wx.get("low_solar_alert") and _rad is not None:
+            parts.append(
+                f"Site-level solar irradiance is low ({_rad:.0f} W/m² avg across "
+                f"{site_wx['site_count']} generator sites). "
+                "Reduced renewable output lifts gas/coal in the merit order."
+            )
+        if site_wx.get("low_wind_alert") and _wind is not None:
+            parts.append(
+                f"Wind speed at generator sites is below cut-in threshold ({_wind:.1f} km/h avg). "
+                "Wind farm output is suppressed — thermal generators cover the gap."
+            )
+    else:
+        missing_data.append("site_weather")
+
     if drivers.binding_constraints:
         top = drivers.binding_constraints[0]
         mv = top.get("values", {}).get("marginal_value")

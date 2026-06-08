@@ -171,6 +171,64 @@ class LNNQuantileModel(ForecastModel):
         probs = 1.0 / (1.0 + np.exp(-logits))
         return {key: probs[:, i] for i, (key, _, _) in enumerate(_SPIKE_THRESHOLDS)}
 
+    def integrated_gradients(
+        self,
+        X_row: np.ndarray,
+        target_quantile_idx: int = 1,
+        steps: int = 50,
+    ) -> list[tuple[str, float]]:
+        """Integrated Gradients attribution for the CfC-based LNN.
+
+        Linearly interpolates from baseline (zeros) to the input sequence in `steps`
+        steps, accumulates ∂P50/∂x_i at each step via PyTorch autograd, and returns
+        top-5 (feature_name, magnitude) pairs. Works for any differentiable CfC model.
+
+        Standard SHAP/TreeSHAP does not work for ODE-based recurrent networks.
+
+        Args:
+            X_row:               (n_features,) feature vector for the current interval
+            target_quantile_idx: which quantile output to differentiate (1 = P50)
+            steps:               Riemann approximation resolution
+
+        Returns:
+            [(feature_name, |attribution|)] sorted by magnitude, top 5.
+        """
+        if not self._is_fitted:
+            return []
+        try:
+            seq = self._windows(X_row.reshape(1, -1))[0:1]  # (1, seq_len, d)
+            baseline = torch.zeros_like(seq)
+            alphas = torch.linspace(0.0, 1.0, steps, device=self.device)
+            grad_accum = torch.zeros_like(seq[0])  # (seq_len, d)
+
+            self._cell.eval()
+            self._head.eval()
+            for alpha in alphas:
+                inp = (baseline + alpha * (seq - baseline)).detach().requires_grad_(True)
+                out, _ = self._cell(inp)
+                pred = self._head(out[:, -1, :])
+                target = pred[0, target_quantile_idx]
+                target.backward()
+                if inp.grad is not None:
+                    grad_accum = grad_accum + inp.grad[0].detach()
+
+            avg_grad = grad_accum / steps
+            ig = (seq[0] - baseline[0]) * avg_grad      # (seq_len, d)
+            # Sum across time, absolute value = feature importance
+            feature_ig = ig.abs().sum(dim=0).cpu().numpy()  # (d,)
+
+            from app.engines.forecasting.features.market_features import FEATURE_COLUMNS
+            names = FEATURE_COLUMNS if len(FEATURE_COLUMNS) == len(feature_ig) else [
+                f"feat_{i}" for i in range(len(feature_ig))
+            ]
+            pairs = sorted(
+                ((names[i], float(feature_ig[i])) for i in range(len(feature_ig))),
+                key=lambda x: x[1], reverse=True,
+            )
+            return pairs[:5]
+        except Exception:
+            return []
+
     def save(self, path: str) -> None:
         """Persist weights — call after fit() if you want to reuse without retraining."""
         if not self._is_fitted:

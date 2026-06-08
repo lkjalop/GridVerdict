@@ -63,6 +63,8 @@ class GatherResult:
     gas_context: dict[str, Any] | None = None
     # ST PASA 7-day adequacy forecast from AEMO
     st_pasa: dict[str, Any] | None = None
+    # Site-level solar irradiance + wind speed at generator locations (OpenMeteo)
+    site_weather: dict[str, Any] | None = None
     # Per-source provenance: keyed by source constant (e.g. "AEMO_DISPATCH_PRICE")
     source_statuses: dict[str, SourceStatus] = field(default_factory=dict)
 
@@ -163,6 +165,7 @@ async def scatter_gather(
         ("ROOFTOP_SOLAR",          _task_rooftop_solar(region, dispatch_for_analogs)),
         ("GBB_GAS_PRICES",         _task_gas_price(region)),
         ("ST_PASA_ADEQUACY",       _task_st_pasa(region)),
+        ("OPENMETEO_SITE_WEATHER", _task_site_weather(region)),
     ]
     if include_weather:
         _ptasks.append(("WEATHER_CONSENSUS", _task_weather(region, cache)))
@@ -196,13 +199,14 @@ async def scatter_gather(
     rooftop_result       = _pdata[8] if isinstance(_pdata[8], dict) else None
     gas_result           = _pdata[9] if isinstance(_pdata[9], dict) else None
     st_pasa_result       = _pdata[10] if isinstance(_pdata[10], dict) else None
-    _weather_idx = 11
+    site_weather_result  = _pdata[11] if isinstance(_pdata[11], dict) else None
+    _weather_idx = 12
     weather_result = (
         _pdata[_weather_idx]
         if include_weather and len(_pdata) > _weather_idx and isinstance(_pdata[_weather_idx], dict)
         else None
     )
-    _commentary_idx = 11 + (1 if include_weather else 0)
+    _commentary_idx = 12 + (1 if include_weather else 0)
     commentary_result: list[dict[str, Any]] = (
         _pdata[_commentary_idx]
         if include_commentary and len(_pdata) > _commentary_idx and isinstance(_pdata[_commentary_idx], list)
@@ -240,8 +244,9 @@ async def scatter_gather(
         _pdata[5] is not None,  # fcas
         bool(unit_events_result),     # T9 unit dispatch
         bool(driver_events_result),   # T10 market drivers
-        gas_result is not None,       # GBB gas prices
-        st_pasa_result is not None,   # ST PASA adequacy
+        gas_result is not None,          # GBB gas prices
+        st_pasa_result is not None,      # ST PASA adequacy
+        site_weather_result is not None, # OpenMeteo site weather
     ]
     if include_weather:
         ok_flags.append(_pdata[_weather_idx] is not None if len(_pdata) > _weather_idx else False)
@@ -277,8 +282,9 @@ async def scatter_gather(
         commentary_context=commentary_result,
         gas_context=gas_result,
         st_pasa=st_pasa_result,
+        site_weather=site_weather_result,
         tasks_ok=tasks_ok,
-        tasks_total=12 + (1 if include_weather else 0) + (1 if include_commentary else 0),
+        tasks_total=13 + (1 if include_weather else 0) + (1 if include_commentary else 0),
         elapsed_ms=elapsed,
         notices_stale=notices_stale,
         news_stale=news_stale,
@@ -604,6 +610,20 @@ async def _task_commentary_context(region: str) -> list[dict[str, Any]]:
     except Exception as exc:
         logger.debug("ScatterGather T8 (commentary context) failed for %s: %s", region, exc)
         return []
+
+
+async def _task_site_weather(region: str) -> dict[str, Any] | None:
+    """OpenMeteo — site-level solar irradiance + wind speed at generator locations."""
+    try:
+        from app.mcp.openmeteo_client import fetch_region_site_weather
+        async with asyncio.timeout(_TASK_TIMEOUT):
+            result = await fetch_region_site_weather(region)
+        if not result.sites:
+            return None
+        return result.to_dict()
+    except Exception as exc:
+        logger.debug("OpenMeteo site weather task failed for %s: %s", region, exc)
+        return None
 
 
 async def _task_gas_price(region: str) -> dict[str, Any] | None:
