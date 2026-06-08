@@ -367,8 +367,13 @@ def _plan_explanation(sources: WhySources, factual: FactualVerdict, *, include_f
     evidence = [
         f"Live dispatch: demand {c.demand_mw:.0f} MW, available generation {c.availability_mw:.0f} MW.",
     ]
-    if sources.news.explained:
-        evidence.append(f"AEMO notice present: {sources.news.top_notice_type}.")
+    if sources.news.explained and sources.news.top_notice_type:
+        try:
+            from app.engines.notice_price_signal import classify_notice as _cn
+            _ns = _cn(sources.news.top_notice_type, c.region)
+            evidence.append(_ns.as_nlp_bullet())
+        except Exception:
+            evidence.append(f"AEMO notice present: {sources.news.top_notice_type}.")
     elif sources.news.notices_stale:
         evidence.append("AEMO notice context is stale or unavailable.")
     if sources.weather.relevant and sources.weather.available:
@@ -519,8 +524,13 @@ def _plan_weather_news(
         direct.append(_weather_support_line(sources))
     else:
         direct.append("Weather evidence is unavailable for this query.")
-    if sources.news.explained:
-        direct.append(f"AEMO notice context is present: {sources.news.top_notice_type}.")
+    if sources.news.explained and sources.news.top_notice_type:
+        try:
+            from app.engines.notice_price_signal import classify_notice as _cn
+            _ns = _cn(sources.news.top_notice_type, sources.current.region)
+            direct.append(_ns.as_nlp_bullet())
+        except Exception:
+            direct.append(f"AEMO notice context is present: {sources.news.top_notice_type}.")
     else:
         direct.append("No relevant AEMO notice confirms the price move.")
     if sources.news.commentary_items:

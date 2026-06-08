@@ -148,11 +148,16 @@ def build_why(sources: WhySources) -> WhyOutput:
 
     # ── AEMO market notice ────────────────────────────────────────────
     if news.explained and news.top_notice_type:
-        parts.append(
-            f"Active AEMO Market Notice: {news.top_notice_type}"
-            + (f" — {news.top_notice_title}" if news.top_notice_title else "")
-            + f" (credibility tier {news.credibility_tier})."
-        )
+        try:
+            from app.engines.notice_price_signal import classify_notice as _cn
+            _ns = _cn(news.top_notice_type, c.region)
+            parts.append(_ns.as_nlp_bullet())
+        except Exception:
+            parts.append(
+                f"Active AEMO Market Notice: {news.top_notice_type}"
+                + (f" — {news.top_notice_title}" if news.top_notice_title else "")
+                + f" (credibility tier {news.credibility_tier})."
+            )
     else:
         missing_data.append("aemo_market_notice")
         if news.notices_stale:

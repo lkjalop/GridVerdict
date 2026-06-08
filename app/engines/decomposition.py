@@ -811,7 +811,8 @@ def _decompose_rules(
     # Category 5: GEOGRAPHIC_REDIRECT — non-NEM electricity markets
     _wa_query = any(w in lower for w in [
         "western australia", "west australia", "perth", "wa energy",
-        "swis", "wem", "western power", "synergy",
+        "wa electricity", "electricity wa", "electricity in wa", "wa prices",
+        "wa power", "power in wa", "swis", "wem", "western power", "synergy",
         "broome", "kalgoorlie", "albany", "geraldton",
     ])
     _nt_query = any(w in lower for w in [
